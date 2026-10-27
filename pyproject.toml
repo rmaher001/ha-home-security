@@ -27,7 +27,7 @@ target-version = "py314"
 line-length = 100
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "B", "UP", "SIM", "ASYNC", "RUF"]
+select = ["E", "F", "W", "I", "B", "BLE", "UP", "SIM", "ASYNC", "RUF"]
 # Home Assistant entity classes declare their attributes as mutable class defaults.
 ignore = ["RUF012"]
 
