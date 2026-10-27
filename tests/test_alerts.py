@@ -154,12 +154,37 @@ async def test_shadow_card_clears_joined_stories(phones: Phones, post) -> None:
         assert sorted(tags) == sorted([f"hs-{STORY_ID}", "hs-01JBOLDER"])
 
 
-async def test_replayed_card_refused(phones: Phones, post) -> None:
+async def test_repeat_of_taken_card_is_a_no_op(phones: Phones, post) -> None:
+    """The engine treats 401 as final, so a repeat answers 200 and does nothing."""
     body = json.dumps(card()).encode()
     headers = signed_headers(body)
     assert await post(card(), headers) == 200
+    assert await post(card(), headers) == 200
+    assert len(phones.to(IPHONE)) == 1
+
+
+@pytest.mark.parametrize("variant", ["0{ts}", "+{ts}", "00{ts}", "{ts}.0", "-{ts}"])
+async def test_timestamp_variants_refused(phones: Phones, post, variant: str) -> None:
+    """Spellings of the same number would verify after int() and dodge the replay guard."""
+    body = json.dumps(card()).encode()
+    headers = signed_headers(body)
+    assert await post(card(), headers) == 200
+    headers["X-HS-Timestamp"] = variant.format(ts=headers["X-HS-Timestamp"])
     assert await post(card(), headers) == 401
     assert len(phones.to(IPHONE)) == 1
+
+
+async def test_padded_timestamp_refused_on_first_sight(phones: Phones, post) -> None:
+    body = json.dumps(card()).encode()
+    ts = int(time.time())
+    digest = hmac.new(WEBHOOK_SECRET.encode(), f"{ts}.".encode() + body, hashlib.sha256)
+    headers = {
+        "X-HS-Timestamp": f"0{ts}",
+        "X-HS-Signature": f"sha256={digest.hexdigest()}",
+        "Content-Type": "application/json",
+    }
+    assert await post(card(), headers) == 401
+    assert phones.calls == []
 
 
 @pytest.mark.parametrize(
@@ -373,5 +398,5 @@ async def test_concurrent_copies_handled_once(
     first, second = await asyncio.gather(
         client.post(url, data=body, headers=headers), client.post(url, data=body, headers=headers)
     )
-    assert sorted([first.status, second.status]) == [200, 401]
+    assert sorted([first.status, second.status]) == [200, 409]
     assert len(phones.to(IPHONE)) == 1

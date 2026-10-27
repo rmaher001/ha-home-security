@@ -44,6 +44,8 @@ _LOGGER = logging.getLogger(__name__)
 MAX_SKEW = 300
 MAX_BODY = 64 * 1024
 SIGNATURE_RE = re.compile(r"\Asha256=([0-9a-f]{64})\Z")
+# One spelling per number: "0123", "+123" would verify after int() as a new message.
+TIMESTAMP_RE = re.compile(r"\A[1-9][0-9]{0,11}\Z")
 IMAGE_LIFETIME = timedelta(days=1)
 EVENT_NOTIFICATION_ACTION = "mobile_app_notification_action"
 EVENT_LOGBOOK_ENTRY = "logbook_entry"
@@ -76,40 +78,47 @@ def verify_signature(secret: str, headers: Any, body: bytes, now: float) -> bool
     """HMAC-SHA256 over `<timestamp>.<body>`, and the timestamp within five minutes."""
     timestamp = headers.get("X-HS-Timestamp", "")
     signature = headers.get("X-HS-Signature", "")
-    try:
-        sent_at = int(timestamp)
-    except ValueError:
+    if not TIMESTAMP_RE.match(timestamp):
         return False
+    sent_at = int(timestamp)
     if abs(now - sent_at) > MAX_SKEW or not (match := SIGNATURE_RE.match(signature)):
         return False
     expected = hmac.new(secret.encode(), f"{sent_at}.".encode() + body, hashlib.sha256)
     return hmac.compare_digest(expected.hexdigest().encode(), match.group(1).encode())
 
 
+class Seen(StrEnum):
+    NEW = "new"
+    HANDLING = "handling"
+    TAKEN = "taken"
+
+
 class ReplayGuard:
-    """Remembers the cards taken in the last five minutes, to refuse a repeat.
+    """Remembers the cards of the last five minutes by signature, to act on each once.
 
     Older ones need no memory: the timestamp check already refuses them. A card is held
-    from the moment it arrives (so a copy sent alongside it is refused) and let go if it
-    wasn't taken, so the engine's resend after a 500 still gets through.
+    from the moment it arrives and let go if it wasn't taken, so the engine's resend after
+    a 500 still gets through.
     """
 
     def __init__(self) -> None:
-        self._seen: dict[tuple[str, str], float] = {}
+        self._seen: dict[str, tuple[float, Seen]] = {}
 
-    def hold(self, timestamp: str, signature: str, now: float) -> bool:
-        """False if this exact message is already held."""
+    def hold(self, signature: str, sent_at: float, now: float) -> Seen:
+        """NEW (and now held), or what an earlier copy's state is."""
         self._seen = {
-            key: sent_at for key, sent_at in self._seen.items() if abs(now - sent_at) <= MAX_SKEW
+            key: seen for key, seen in self._seen.items() if abs(now - seen[0]) <= MAX_SKEW
         }
-        key = (timestamp, signature)
-        if key in self._seen:
-            return False
-        self._seen[key] = float(timestamp)
-        return True
+        if (seen := self._seen.get(signature)) is not None:
+            return seen[1]
+        self._seen[signature] = (sent_at, Seen.HANDLING)
+        return Seen.NEW
 
-    def release(self, timestamp: str, signature: str) -> None:
-        self._seen.pop((timestamp, signature), None)
+    def done(self, signature: str, taken: bool) -> None:
+        if not taken:
+            self._seen.pop(signature, None)
+        elif signature in self._seen:
+            self._seen[signature] = (self._seen[signature][0], Seen.TAKEN)
 
 
 async def _async_read_capped(request: web.Request) -> bytes | None:
@@ -268,13 +277,16 @@ def async_setup_alerts(hass: HomeAssistant, entry: HomeSecurityConfigEntry) -> N
         now = time.time()
         timestamp = request.headers.get("X-HS-Timestamp", "")
         signature = request.headers.get("X-HS-Signature", "")
-        if not verify_signature(secret, request.headers, body, now) or not replays.hold(
-            timestamp, signature, now
-        ):
+        if not verify_signature(secret, request.headers, body, now):
             return web.Response(status=HTTPStatus.UNAUTHORIZED)
+        match replays.hold(signature, int(timestamp), now):
+            case Seen.TAKEN:
+                # Already done. The engine treats 401 as final, so a repeat is simply a no-op.
+                return web.Response(status=HTTPStatus.OK)
+            case Seen.HANDLING:
+                return web.Response(status=HTTPStatus.CONFLICT)
         status = await _async_take(hass, entry, body)
-        if status >= HTTPStatus.MULTIPLE_CHOICES:
-            replays.release(timestamp, signature)
+        replays.done(signature, taken=status < HTTPStatus.MULTIPLE_CHOICES)
         return web.Response(status=status)
 
     webhook.async_register(
