@@ -56,17 +56,42 @@ function when(iso) {
   return `${date.toLocaleDateString([], { weekday: "short" })} ${time}`;
 }
 
+// Signed picture URLs live an hour; reuse each for 50 minutes, per source, so a re-render
+// never asks again. A failed request isn't remembered.
+const PICTURE_TTL = 50 * 60 * 1000;
+const pictureCache = new WeakMap();
+
+function cachedPictureUrl(source, id) {
+  let cache = pictureCache.get(source);
+  if (!cache) pictureCache.set(source, (cache = new Map()));
+  const hit = cache.get(id);
+  if (hit && Date.now() - hit.at < PICTURE_TTL) return hit.url;
+  const url = Promise.resolve().then(() => source.pictureUrl(id));
+  cache.set(id, { at: Date.now(), url });
+  url.catch(() => forgetPictureUrl(source, id, url));
+  return url;
+}
+
+function forgetPictureUrl(source, id, url) {
+  const cache = pictureCache.get(source);
+  if (cache && (!url || cache.get(id)?.url === url)) cache.delete(id);
+}
+
 // The shared base: a shadow root, a source to follow, and a render on each update.
 class HsElement extends HTMLElement {
   constructor() {
     super();
     this.attachShadow({ mode: "open" });
     this._data = null;
+    this._pictures = new Map();
+    this._used = new Set();
   }
   set source(source) {
     if (source === this._source) return;
     this._unsubscribe?.();
+    this._unsubscribe = null;
     this._source = source;
+    this._pictures = new Map();
     this._subscribe();
   }
   get source() {
@@ -90,8 +115,42 @@ class HsElement extends HTMLElement {
         );
         return;
       }
-      this._render();
+      this._draw();
     });
+  }
+  // Render, then drop the pictures of stories no longer shown.
+  _draw() {
+    this._used = new Set();
+    this._render();
+    for (const id of this._pictures.keys()) if (!this._used.has(id)) this._pictures.delete(id);
+  }
+  // The story's <img>, made once and kept while the story stays on screen, so a state push
+  // never reloads it (no flicker). Null once its picture failed.
+  _picture(id, alt, style) {
+    this._used.add(id);
+    if (this._pictures.has(id)) {
+      const kept = this._pictures.get(id);
+      kept?.setAttribute("alt", alt);
+      return kept;
+    }
+    const source = this._source;
+    const picture = el("img", { alt, style });
+    let failed = false;
+    const fail = (url) => {
+      if (failed) return;
+      failed = true;
+      picture.remove();
+      if (this._pictures.get(id) === picture) this._pictures.set(id, null);
+      forgetPictureUrl(source, id, url);
+    };
+    picture.addEventListener("error", () => fail());
+    const url = cachedPictureUrl(source, id);
+    url.then(
+      (src) => (picture.src = src),
+      () => fail(url),
+    );
+    this._pictures.set(id, picture);
+    return picture;
   }
   _paint(...nodes) {
     this.shadowRoot.replaceChildren(el("style", {}, STYLE), ...nodes);
@@ -119,14 +178,10 @@ class HsStory extends HsElement {
     }
     const story = live[0];
     const level = LEVELS[story.level] || LEVELS.watch;
-    const picture = el("img", {
-      alt: story.title,
-      style: "display:block;width:100%;aspect-ratio:16/9;object-fit:cover;background:#37474F",
-      onerror: () => picture.remove(),
-    });
-    this._source.pictureUrl(story.id).then(
-      (url) => (picture.src = url),
-      () => picture.remove(),
+    const picture = this._picture(
+      story.id,
+      story.title,
+      "display:block;width:100%;aspect-ratio:16/9;object-fit:cover;background:#37474F",
     );
     const fine = el("button", { class: "pill", style: "flex:1" }, story.fine ? "Marked fine" : "That's fine");
     if (story.fine || story.level === "safety") fine.disabled = true;
@@ -168,14 +223,10 @@ class HsWeek extends HsElement {
       const open = this._open === story.id;
       const detail = [];
       if (open) {
-        const picture = el("img", {
-          alt: "",
-          style: "display:block;width:100%;border-radius:8px;margin-top:8px;background:#37474F",
-          onerror: () => picture.remove(),
-        });
-        this._source.pictureUrl(story.id).then(
-          (url) => (picture.src = url),
-          () => picture.remove(),
+        const picture = this._picture(
+          story.id,
+          "",
+          "display:block;width:100%;border-radius:8px;margin-top:8px;background:#37474F",
         );
         detail.push(el("p", { style: "margin:6px 0 0;font-size:14px;line-height:1.4" }, story.why), picture);
         if (!story.fine && story.level !== "safety") {
@@ -200,13 +251,13 @@ class HsWeek extends HsElement {
           style: "cursor:pointer",
           onclick: () => {
             this._open = open ? null : story.id;
-            this._render();
+            this._draw();
           },
           onkeydown: (event) => {
             if (event.key === "Enter" || event.key === " ") {
               event.preventDefault();
               this._open = open ? null : story.id;
-              this._render();
+              this._draw();
             }
           },
         },
@@ -344,8 +395,14 @@ for (const [name, element] of [
 
 // ---- In Home Assistant: the data comes through the integration's websocket commands ----
 
+// One source per Home Assistant connection, so every card on a dashboard shares the
+// picture URL cache.
+const haSources = new WeakMap();
+
 function haSource(hass) {
-  return {
+  const shared = haSources.get(hass.connection);
+  if (shared) return shared;
+  const source = {
     hass,
     subscribe(callback) {
       let unsubscribe = null;
@@ -369,6 +426,8 @@ function haSource(hass) {
       return this.hass.callWS({ type: "home_security/set_mode", mode });
     },
   };
+  haSources.set(hass.connection, source);
+  return source;
 }
 
 // The dashboard card: `type: custom:home-security-card`, with `show` any of
@@ -386,7 +445,7 @@ class HomeSecurityCard extends HTMLElement {
     if (this._source) for (const part of this._parts) part.source = this._source;
   }
   set hass(hass) {
-    if (!this._source) {
+    if (!this._source || this._source.hass.connection !== hass.connection) {
       this._source = haSource(hass);
       for (const part of this._parts || []) part.source = this._source;
     }
