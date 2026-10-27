@@ -30,7 +30,7 @@ class AlertsSwitch(HomeSecurityEntity, SwitchEntity):
         return self.engine_state.get("alerts")
 
     async def async_turn_on(self, **kwargs: Any) -> None:
-        await self.coordinator.client.async_set_alerts(True)
+        await self.async_engine_call(self.coordinator.client.async_set_alerts(True))
 
     async def async_turn_off(self, **kwargs: Any) -> None:
-        await self.coordinator.client.async_set_alerts(False)
+        await self.async_engine_call(self.coordinator.client.async_set_alerts(False))

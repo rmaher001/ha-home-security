@@ -42,4 +42,4 @@ class ModeSelect(HomeSecurityEntity, SelectEntity):
         return {"in_force": self._mode.get("effective"), "set_by_hand": chosen != "auto"}
 
     async def async_select_option(self, option: str) -> None:
-        await self.coordinator.client.async_set_mode(option)
+        await self.async_engine_call(self.coordinator.client.async_set_mode(option))

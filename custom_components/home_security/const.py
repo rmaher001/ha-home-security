@@ -35,3 +35,5 @@ CARDS_FILE: Final = "home-security-cards.js"
 FINE_ACTION_PREFIX: Final = "HS_FINE::"
 NOTIFY_TAG_PREFIX: Final = "hs-"
 NOTIFY_GROUP: Final = "home-security"
+
+SIGNAL_UPDATE: Final = f"{DOMAIN}_update"

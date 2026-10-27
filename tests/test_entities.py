@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import copy
 
+import pytest
 from homeassistant.const import ATTR_ENTITY_ID, STATE_UNAVAILABLE
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
@@ -124,3 +126,14 @@ async def test_alerts_switch(
     )
     assert ("PUT", "alerts", {"on": False}) in engine.calls
     assert ("PUT", "alerts", {"on": True}) in engine.calls
+
+
+async def test_engine_refusal_is_an_error(
+    hass: HomeAssistant, engine: FakeEngine, config_entry: MockConfigEntry
+) -> None:
+    await setup_integration(hass, config_entry)
+    engine.token = "rotated"
+    with pytest.raises(HomeAssistantError):
+        await hass.services.async_call(
+            "switch", "turn_off", {ATTR_ENTITY_ID: "switch.home_security_alerts"}, blocking=True
+        )

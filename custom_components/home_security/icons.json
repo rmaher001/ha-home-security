@@ -1,0 +1,33 @@
+{
+  "entity": {
+    "select": {
+      "mode": {
+        "default": "mdi:shield-home",
+        "state": {
+          "auto": "mdi:shield-sync",
+          "home": "mdi:shield-home",
+          "night": "mdi:shield-moon",
+          "away": "mdi:shield-lock"
+        }
+      }
+    },
+    "switch": {
+      "alerts": {
+        "default": "mdi:bell-ring",
+        "state": { "off": "mdi:bell-off" }
+      }
+    },
+    "binary_sensor": {
+      "protect": { "default": "mdi:cctv" }
+    },
+    "sensor": {
+      "ai": { "default": "mdi:brain" },
+      "ai_speed": { "default": "mdi:timer-outline" },
+      "cameras_connected": { "default": "mdi:cctv" },
+      "sound_listener": { "default": "mdi:ear-hearing" }
+    }
+  },
+  "services": {
+    "mark_fine": { "service": "mdi:check-circle" }
+  }
+}

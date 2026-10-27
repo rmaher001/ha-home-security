@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable
 from typing import Any
 
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity import Entity
 
+from .api import EngineError
 from .const import DOMAIN, NAME
 from .coordinator import HomeSecurityCoordinator
 
@@ -44,3 +47,14 @@ class HomeSecurityEntity(Entity):
 
     async def async_added_to_hass(self) -> None:
         self.async_on_remove(self.coordinator.async_add_listener(self.async_write_ha_state))
+
+    async def async_engine_call(self, call: Awaitable[None]) -> None:
+        """Run an engine request, turning its failure into a user-facing error."""
+        try:
+            await call
+        except EngineError as err:
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="engine_error",
+                translation_placeholders={"error": str(err)},
+            ) from err

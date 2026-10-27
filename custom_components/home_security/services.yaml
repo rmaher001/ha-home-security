@@ -1,0 +1,7 @@
+mark_fine:
+  fields:
+    story_id:
+      required: true
+      example: "01JB0000000000000000000000"
+      selector:
+        text:

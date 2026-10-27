@@ -11,9 +11,10 @@ from typing import TYPE_CHECKING, Any
 import aiohttp
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers.dispatcher import async_dispatcher_send
 
 from .api import EngineAuthError, EngineClient, EngineError
-from .const import DOMAIN, STORY_DAYS
+from .const import DOMAIN, SIGNAL_UPDATE, STORY_DAYS
 
 if TYPE_CHECKING:
     from . import HomeSecurityConfigEntry
@@ -55,6 +56,7 @@ class HomeSecurityCoordinator:
     def _notify(self) -> None:
         for update in list(self._listeners):
             update()
+        async_dispatcher_send(self.hass, SIGNAL_UPDATE)
 
     async def async_start(self) -> None:
         """Read the state once (raising if the engine is unreachable), then go live."""
@@ -72,7 +74,7 @@ class HomeSecurityCoordinator:
             self._task = None
         if self._ws and not self._ws.closed:
             await self._ws.close()
-        self.connected = False
+        self._set_connected(False)
 
     async def _async_run(self) -> None:
         backoff = BACKOFF_START
@@ -142,3 +144,11 @@ class HomeSecurityCoordinator:
         )
         if device and self.state:
             registry.async_update_device(device.id, sw_version=self.state.get("version"))
+
+
+@callback
+def async_get_coordinator(hass: HomeAssistant) -> HomeSecurityCoordinator | None:
+    """The loaded entry's coordinator (there is at most one entry)."""
+    for entry in hass.config_entries.async_loaded_entries(DOMAIN):
+        return entry.runtime_data.coordinator
+    return None
