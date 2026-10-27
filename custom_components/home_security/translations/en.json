@@ -42,7 +42,7 @@
         },
         "data_description": {
           "phones": "Phones with the Home Assistant app. None chosen means no phone alerts.",
-          "dashboard": "A dashboard path, for example /security."
+          "dashboard": "A dashboard path, for example /my-dashboard/security."
         }
       }
     }

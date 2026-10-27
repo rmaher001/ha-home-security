@@ -16,7 +16,7 @@ CONF_WEBHOOK_SECRET: Final = "webhook_secret"
 CONF_PHONES: Final = "phones"
 CONF_DASHBOARD: Final = "dashboard"
 
-DEFAULT_DASHBOARD: Final = "/security"
+DEFAULT_DASHBOARD: Final = "/my-dashboard/security"
 PAIR_NAME: Final = "Home Assistant"
 STORY_DAYS: Final = 7
 

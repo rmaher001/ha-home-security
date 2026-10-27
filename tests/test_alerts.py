@@ -254,3 +254,11 @@ async def test_thats_fine_action(hass: HomeAssistant, engine: FakeEngine, phones
     hass.bus.async_fire("mobile_app_notification_action", {"action": "SOMETHING_ELSE"})
     await hass.async_block_till_done()
     assert [c for c in engine.calls if c[1] == "fine"] == [("POST", "fine", STORY_ID)]
+
+
+async def test_default_dashboard_link(
+    hass: HomeAssistant, phones: Phones, config_entry: MockConfigEntry, post
+) -> None:
+    hass.config_entries.async_update_entry(config_entry, options={CONF_PHONES: [IPHONE]})
+    assert await post(card()) == 200
+    assert phones.to(IPHONE)[0]["data"]["url"] == f"/my-dashboard/security?story={STORY_ID}"

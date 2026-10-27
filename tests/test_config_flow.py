@@ -168,4 +168,4 @@ async def test_options_defaults(hass: HomeAssistant, config_entry: MockConfigEnt
     result = await hass.config_entries.options.async_init(config_entry.entry_id)
     result = await hass.config_entries.options.async_configure(result["flow_id"], {})
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert config_entry.options == {CONF_PHONES: [], CONF_DASHBOARD: "/security"}
+    assert config_entry.options == {CONF_PHONES: [], CONF_DASHBOARD: "/my-dashboard/security"}
