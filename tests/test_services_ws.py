@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+from pathlib import Path
 
 import pytest
 from homeassistant.core import HomeAssistant
@@ -220,7 +222,10 @@ async def test_cards_file_served_under_versioned_name(
     hass_client: ClientSessionGenerator,
 ) -> None:
     await setup_integration(hass, config_entry)
-    url = "/home_security_frontend/home-security-cards-0.1.0.js"
+    # Any change to the file gives it a new name, version bump or not.
+    cards = Path(__file__).parents[1] / "custom_components/home_security/frontend"
+    digest = hashlib.sha256((cards / "home-security-cards.js").read_bytes()).hexdigest()[:12]
+    url = f"/home_security_frontend/home-security-cards-0.1.0-{digest}.js"
     assert url in hass.data["frontend_extra_module_url"].urls
 
     http = await hass_client()
