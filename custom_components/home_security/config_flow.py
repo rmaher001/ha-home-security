@@ -157,6 +157,34 @@ class HomeSecurityConfigFlow(ConfigFlow, domain=DOMAIN):
             description_placeholders={"url": entry.data[CONF_URL]},
         )
 
+    async def async_step_reconfigure(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """A new engine address, or pairing again on purpose: a new code, same webhook."""
+        errors: dict[str, str] = {}
+        entry = self._get_reconfigure_entry()
+        if user_input is not None:
+            url = user_input[CONF_URL].strip().rstrip("/")
+            token, error = await _pair(
+                self.hass,
+                url,
+                user_input[CONF_CODE],
+                entry.data[CONF_WEBHOOK_ID],
+                entry.data[CONF_WEBHOOK_SECRET],
+            )
+            if token:
+                return self.async_update_reload_and_abort(
+                    entry, data_updates={CONF_URL: url, CONF_TOKEN: token}
+                )
+            errors["base"] = error or "unknown"
+        return self.async_show_form(
+            step_id="reconfigure",
+            data_schema=self.add_suggested_values_to_schema(
+                USER_SCHEMA, user_input or {CONF_URL: entry.data[CONF_URL]}
+            ),
+            errors=errors,
+        )
+
     @staticmethod
     @callback
     def async_get_options_flow(config_entry: ConfigEntry) -> OptionsFlow:

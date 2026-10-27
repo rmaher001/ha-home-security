@@ -19,6 +19,18 @@
         "data": {
           "code": "Pairing code"
         }
+      },
+      "reconfigure": {
+        "title": "Change the engine",
+        "description": "To move to a new engine address, or to pair again on purpose: make a pairing code on the engine's setup page and enter the address and the code here. Alerts keep the same webhook.",
+        "data": {
+          "url": "Engine address",
+          "code": "Pairing code"
+        },
+        "data_description": {
+          "url": "For example http://192.0.2.10:8780",
+          "code": "Eight letters and digits, like ABCD-EF23. It works once, for 15 minutes."
+        }
       }
     },
     "error": {
@@ -29,7 +41,8 @@
     },
     "abort": {
       "single_instance_allowed": "Home Security is already set up.",
-      "reauth_successful": "Paired again."
+      "reauth_successful": "Paired again.",
+      "reconfigure_successful": "Paired with the engine."
     }
   },
   "options": {
@@ -81,7 +94,9 @@
       "problem": {
         "name": "Problem",
         "state_attributes": {
-          "problems": { "name": "Problems" }
+          "problems": {
+            "name": "Problems"
+          }
         }
       },
       "protect": {
@@ -99,7 +114,9 @@
           "not_answering": "Not answering"
         },
         "state_attributes": {
-          "seconds": { "name": "Seconds" }
+          "seconds": {
+            "name": "Seconds"
+          }
         }
       },
       "ai_speed": {
@@ -108,7 +125,9 @@
       "cameras_connected": {
         "name": "Cameras connected",
         "state_attributes": {
-          "total": { "name": "Total" }
+          "total": {
+            "name": "Total"
+          }
         }
       },
       "sound_listener": {

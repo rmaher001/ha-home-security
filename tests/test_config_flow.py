@@ -169,3 +169,48 @@ async def test_options_defaults(hass: HomeAssistant, config_entry: MockConfigEnt
     result = await hass.config_entries.options.async_configure(result["flow_id"], {})
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert config_entry.options == {CONF_PHONES: [], CONF_DASHBOARD: "/my-dashboard/security"}
+
+
+async def test_reconfigure(
+    hass: HomeAssistant, engine: FakeEngine, internal_url, socket_enabled
+) -> None:
+    """Move to a new engine address with a new code; the webhook stays."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Home Security",
+        data={
+            CONF_URL: "http://127.0.0.1:1",
+            CONF_TOKEN: "old-token",
+            CONF_WEBHOOK_ID: WEBHOOK_ID,
+            CONF_WEBHOOK_SECRET: WEBHOOK_SECRET,
+        },
+    )
+    entry.add_to_hass(hass)
+    result = await entry.start_reconfigure_flow(hass)
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "reconfigure"
+
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_URL: "http://127.0.0.1:1", CONF_CODE: PAIR_CODE}
+    )
+    assert result["errors"] == {"base": "cannot_connect"}
+
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_URL: engine.url, CONF_CODE: "WRONG-123"}
+    )
+    assert result["errors"] == {"base": "invalid_code"}
+
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_URL: engine.url + "/", CONF_CODE: PAIR_CODE}
+    )
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "reconfigure_successful"
+    assert entry.data == {
+        CONF_URL: engine.url,
+        CONF_TOKEN: engine.token,
+        CONF_WEBHOOK_ID: WEBHOOK_ID,
+        CONF_WEBHOOK_SECRET: WEBHOOK_SECRET,
+    }
+    sent = engine.paired[-1]
+    assert sent["webhook_url"] == f"{INTERNAL_URL}/api/webhook/{WEBHOOK_ID}"
+    assert sent["webhook_secret"] == WEBHOOK_SECRET

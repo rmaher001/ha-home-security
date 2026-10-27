@@ -42,8 +42,13 @@ Requires Home Assistant 2026.10 or newer.
 3. In Home Assistant, go to **Settings > Devices & services > Add integration > Home
    Security**, and enter the engine's address and the code.
 
-If the engine is ever paired again elsewhere, Home Assistant asks for a new code
-(**Reconfigure** on the integration's card).
+If the engine stops accepting Home Assistant (for example, it was paired again elsewhere),
+Home Assistant asks for a new code: **Settings > Devices & services** shows Home Security
+as needing attention. Make a code on the engine's setup page and enter it there.
+
+To move to a new engine address, or to pair again on purpose: **Settings > Devices &
+services > Home Security**, open the menu and choose **Reconfigure**, then enter the
+address and a new code. Alerts keep working through the same webhook.
 
 ## Phones and the alert link
 
