@@ -7,6 +7,7 @@ import hashlib
 import hmac
 import json
 import logging
+import re
 import time
 from datetime import timedelta
 from enum import StrEnum
@@ -41,6 +42,8 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 
 MAX_SKEW = 300
+MAX_BODY = 64 * 1024
+SIGNATURE_RE = re.compile(r"\Asha256=([0-9a-f]{64})\Z")
 IMAGE_LIFETIME = timedelta(days=1)
 EVENT_NOTIFICATION_ACTION = "mobile_app_notification_action"
 EVENT_LOGBOOK_ENTRY = "logbook_entry"
@@ -77,10 +80,48 @@ def verify_signature(secret: str, headers: Any, body: bytes, now: float) -> bool
         sent_at = int(timestamp)
     except ValueError:
         return False
-    if abs(now - sent_at) > MAX_SKEW or not signature.startswith("sha256="):
+    if abs(now - sent_at) > MAX_SKEW or not (match := SIGNATURE_RE.match(signature)):
         return False
     expected = hmac.new(secret.encode(), f"{sent_at}.".encode() + body, hashlib.sha256)
-    return hmac.compare_digest(expected.hexdigest(), signature.removeprefix("sha256="))
+    return hmac.compare_digest(expected.hexdigest().encode(), match.group(1).encode())
+
+
+class ReplayGuard:
+    """Remembers the cards taken in the last five minutes, to refuse a repeat.
+
+    Older ones need no memory: the timestamp check already refuses them. A card is held
+    from the moment it arrives (so a copy sent alongside it is refused) and let go if it
+    wasn't taken, so the engine's resend after a 500 still gets through.
+    """
+
+    def __init__(self) -> None:
+        self._seen: dict[tuple[str, str], float] = {}
+
+    def hold(self, timestamp: str, signature: str, now: float) -> bool:
+        """False if this exact message is already held."""
+        self._seen = {
+            key: sent_at for key, sent_at in self._seen.items() if abs(now - sent_at) <= MAX_SKEW
+        }
+        key = (timestamp, signature)
+        if key in self._seen:
+            return False
+        self._seen[key] = float(timestamp)
+        return True
+
+    def release(self, timestamp: str, signature: str) -> None:
+        self._seen.pop((timestamp, signature), None)
+
+
+async def _async_read_capped(request: web.Request) -> bytes | None:
+    """The body, or None when it is over MAX_BODY (with or without a Content-Length)."""
+    if request.content_length is not None and request.content_length > MAX_BODY:
+        return None
+    body = bytearray()
+    while chunk := await request.content.read(MAX_BODY + 1 - len(body)):
+        body.extend(chunk)
+        if len(body) > MAX_BODY:
+            return None
+    return bytes(body)
 
 
 def loudness(level: str | None, alert: bool) -> Loudness:
@@ -160,7 +201,16 @@ async def async_handle_card(
         _LOGGER.warning("Ignoring a card without a valid story id")
         return HTTPStatus.OK
 
+    phones: list[str] = list(entry.options.get(CONF_PHONES, []))
+    to_clear = [
+        joined
+        for joined in card.get("joined") or []
+        if isinstance(joined, str) and STORY_ID_RE.match(joined)
+    ]
+
     if card.get("shadow"):
+        # Alerts are off: the logbook and the dashboard only. The story's own earlier
+        # alert comes off the phones too, so none is left showing stale news.
         hass.bus.async_fire(
             EVENT_LOGBOOK_ENTRY,
             {
@@ -169,21 +219,17 @@ async def async_handle_card(
                 "domain": DOMAIN,
             },
         )
-        return HTTPStatus.OK
-
-    phones: list[str] = list(entry.options.get(CONF_PHONES, []))
-    dashboard: str = entry.options.get(CONF_DASHBOARD) or DEFAULT_DASHBOARD
-    sends = [
-        _async_notify(hass, phone, build_notification(hass, phone, card, dashboard))
-        for phone in phones
-    ]
-    for joined in card.get("joined") or []:
-        if isinstance(joined, str) and STORY_ID_RE.match(joined):
-            clear = {
-                "message": "clear_notification",
-                "data": {"tag": f"{NOTIFY_TAG_PREFIX}{joined}"},
-            }
-            sends.extend(_async_notify(hass, phone, clear) for phone in phones)
+        sends = []
+        to_clear.insert(0, story)
+    else:
+        dashboard: str = entry.options.get(CONF_DASHBOARD) or DEFAULT_DASHBOARD
+        sends = [
+            _async_notify(hass, phone, build_notification(hass, phone, card, dashboard))
+            for phone in phones
+        ]
+    for clear_id in to_clear:
+        clear = {"message": "clear_notification", "data": {"tag": f"{NOTIFY_TAG_PREFIX}{clear_id}"}}
+        sends.extend(_async_notify(hass, phone, clear) for phone in phones)
 
     results = await asyncio.gather(*sends)
     # Answering 500 makes the engine resend; only worth it when nothing got through.
@@ -192,23 +238,44 @@ async def async_handle_card(
     return HTTPStatus.OK
 
 
+async def _async_take(hass: HomeAssistant, entry: HomeSecurityConfigEntry, body: bytes) -> int:
+    """Handle one verified message. Returns the HTTP status for the engine."""
+    try:
+        message = json.loads(body)
+    except ValueError:
+        return HTTPStatus.BAD_REQUEST
+    # Sound requests are for a receiver that plays sounds; this one doesn't.
+    if not isinstance(message, dict) or message.get("type") != "card":
+        return HTTPStatus.OK
+    try:
+        return await async_handle_card(hass, entry, message)
+    except Exception:
+        # Home Assistant's webhook handler would answer 200 and the card would be lost;
+        # 500 makes the engine send it again.
+        _LOGGER.exception("Couldn't handle a card from the engine")
+        return HTTPStatus.INTERNAL_SERVER_ERROR
+
+
 def async_setup_alerts(hass: HomeAssistant, entry: HomeSecurityConfigEntry) -> None:
     """Register the webhook and the That's fine action; both go when the entry unloads."""
     webhook_id = entry.data[CONF_WEBHOOK_ID]
     secret = entry.data[CONF_WEBHOOK_SECRET]
+    replays = ReplayGuard()
 
     async def handle(hass: HomeAssistant, webhook_id: str, request: web.Request) -> web.Response:
-        body = await request.read()
-        if not verify_signature(secret, request.headers, body, time.time()):
+        if (body := await _async_read_capped(request)) is None:
+            return web.Response(status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+        now = time.time()
+        timestamp = request.headers.get("X-HS-Timestamp", "")
+        signature = request.headers.get("X-HS-Signature", "")
+        if not verify_signature(secret, request.headers, body, now) or not replays.hold(
+            timestamp, signature, now
+        ):
             return web.Response(status=HTTPStatus.UNAUTHORIZED)
-        try:
-            message = json.loads(body)
-        except ValueError:
-            return web.Response(status=HTTPStatus.BAD_REQUEST)
-        # Sound requests are for a receiver that plays sounds; this one doesn't.
-        if not isinstance(message, dict) or message.get("type") != "card":
-            return web.Response(status=HTTPStatus.OK)
-        return web.Response(status=await async_handle_card(hass, entry, message))
+        status = await _async_take(hass, entry, body)
+        if status >= HTTPStatus.MULTIPLE_CHOICES:
+            replays.release(timestamp, signature)
+        return web.Response(status=status)
 
     webhook.async_register(
         hass, DOMAIN, NAME, webhook_id, handle, local_only=True, allowed_methods=["POST"]

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
 import time
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 from homeassistant.core import HomeAssistant, ServiceCall
@@ -134,10 +136,94 @@ async def test_stale_timestamp_refused(phones: Phones, post) -> None:
 async def test_shadow_card_goes_to_logbook_only(hass: HomeAssistant, phones: Phones, post) -> None:
     events = async_capture_events(hass, "logbook_entry")
     assert await post(card(shadow=True)) == 200
-    assert phones.calls == []
     assert len(events) == 1
     assert events[0].data["name"] == "Home security (quiet)"
     assert "Person at the front door" in events[0].data["message"]
+    # No alert; only the story's own earlier alert is taken off the phones.
+    for phone in (IPHONE, ANDROID):
+        assert phones.to(phone) == [
+            {"message": "clear_notification", "data": {"tag": f"hs-{STORY_ID}"}}
+        ]
+
+
+async def test_shadow_card_clears_joined_stories(phones: Phones, post) -> None:
+    assert await post(card(shadow=True, joined=["01JBOLDER"])) == 200
+    for phone in (IPHONE, ANDROID):
+        tags = [d["data"]["tag"] for d in phones.to(phone)]
+        assert all(d["message"] == "clear_notification" for d in phones.to(phone))
+        assert sorted(tags) == sorted([f"hs-{STORY_ID}", "hs-01JBOLDER"])
+
+
+async def test_replayed_card_refused(phones: Phones, post) -> None:
+    body = json.dumps(card()).encode()
+    headers = signed_headers(body)
+    assert await post(card(), headers) == 200
+    assert await post(card(), headers) == 401
+    assert len(phones.to(IPHONE)) == 1
+
+
+@pytest.mark.parametrize(
+    "signature",
+    [
+        "sha256=" + "A" * 64,  # uppercase hex
+        "sha256=" + "a" * 63,  # short
+        "sha256=" + "a" * 65,  # long
+        "sha256=" + "g" * 64,  # not hex
+        "a" * 64,  # no prefix
+    ],
+)
+async def test_malformed_signature_refused(phones: Phones, post, signature: str) -> None:
+    body = json.dumps(card()).encode()
+    headers = signed_headers(body)
+    headers["X-HS-Signature"] = signature
+    assert await post(card(), headers) == 401
+
+
+async def test_uppercase_copy_of_valid_signature_refused(phones: Phones, post) -> None:
+    body = json.dumps(card()).encode()
+    headers = signed_headers(body)
+    headers["X-HS-Signature"] = "sha256=" + headers["X-HS-Signature"][7:].upper()
+    assert await post(card(), headers) == 401
+    assert phones.calls == []
+
+
+async def test_oversized_body_refused(
+    hass: HomeAssistant, phones: Phones, hass_client_no_auth: ClientSessionGenerator
+) -> None:
+    client = await hass_client_no_auth()
+    body = json.dumps(card(message="x" * 70_000)).encode()
+    resp = await client.post(f"/api/webhook/{WEBHOOK_ID}", data=body, headers=signed_headers(body))
+    assert resp.status == 413
+    assert phones.calls == []
+
+
+async def test_oversized_chunked_body_refused(
+    hass: HomeAssistant, phones: Phones, hass_client_no_auth: ClientSessionGenerator
+) -> None:
+    """Without a Content-Length the read itself is capped."""
+    client = await hass_client_no_auth()
+    body = json.dumps(card(message="x" * 70_000)).encode()
+
+    async def chunks():
+        for start in range(0, len(body), 8192):
+            yield body[start : start + 8192]
+
+    resp = await client.post(
+        f"/api/webhook/{WEBHOOK_ID}", data=chunks(), headers=signed_headers(body)
+    )
+    assert resp.status == 413
+    assert phones.calls == []
+
+
+async def test_unexpected_error_answers_500(
+    phones: Phones, post, caplog: pytest.LogCaptureFixture
+) -> None:
+    with patch(
+        "custom_components.home_security.alerts.build_notification",
+        side_effect=RuntimeError("boom"),
+    ):
+        assert await post(card()) == 500
+    assert caplog.text.count("boom") == 1
 
 
 async def test_urgent_card_ios(phones: Phones, post) -> None:
@@ -262,3 +348,30 @@ async def test_default_dashboard_link(
     hass.config_entries.async_update_entry(config_entry, options={CONF_PHONES: [IPHONE]})
     assert await post(card()) == 200
     assert phones.to(IPHONE)[0]["data"]["url"] == f"/my-dashboard/security?story={STORY_ID}"
+
+
+async def test_resend_after_500_is_taken(phones: Phones, post) -> None:
+    """A card answered 500 isn't remembered, so the engine's identical resend gets through."""
+    body = json.dumps(card()).encode()
+    headers = signed_headers(body)
+    with patch(
+        "custom_components.home_security.alerts.build_notification",
+        side_effect=RuntimeError("boom"),
+    ):
+        assert await post(card(), headers) == 500
+    assert await post(card(), headers) == 200
+    assert len(phones.to(IPHONE)) == 1
+
+
+async def test_concurrent_copies_handled_once(
+    hass: HomeAssistant, phones: Phones, hass_client_no_auth: ClientSessionGenerator
+) -> None:
+    client = await hass_client_no_auth()
+    body = json.dumps(card()).encode()
+    headers = signed_headers(body)
+    url = f"/api/webhook/{WEBHOOK_ID}"
+    first, second = await asyncio.gather(
+        client.post(url, data=body, headers=headers), client.post(url, data=body, headers=headers)
+    )
+    assert sorted([first.status, second.status]) == [200, 401]
+    assert len(phones.to(IPHONE)) == 1

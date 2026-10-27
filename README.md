@@ -11,8 +11,9 @@ for your dashboards, and alerts on your phones.
   - **Mode** (select): Auto, Home, Night or Away. Auto lets the engine pick from who is home;
     the `in_force` attribute says what is in force right now and `set_by_hand` whether someone
     chose it.
-  - **Alerts** (switch): off keeps cards coming, quietly. Safety alerts (smoke, CO, leaks)
-    always ring.
+  - **Alerts** (switch): off means stories reach the logbook and the dashboard only, with no
+    phone alerts (any alert already on a phone for that story is taken away). Safety alerts
+    (smoke, CO, leaks) always ring.
   - Diagnostics: **Problem**, **AI**, **AI speed**, **Cameras connected**, **Sound listener**,
     **Protect** and **Home Assistant link**.
 - **Phone alerts** through the Home Assistant app, iOS and Android. Each story is one

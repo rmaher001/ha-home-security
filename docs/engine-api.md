@@ -52,7 +52,8 @@ sound requests to `webhook_url`, signed with `webhook_secret`.
 - `mode.chosen`: `auto`, `home`, `night` or `away`. `mode.effective` is what is in force (what
   Auto picked, or the hand-set mode); `null` while Auto hasn't read who is home yet.
 - `home`: the household, by name: home or not.
-- `alerts`: false means cards still arrive but marked `shadow` (quiet); safety cards always ring.
+- `alerts`: false means cards still arrive, marked `shadow`: they reach the logbook and the
+  dashboard only, with no phone alerts. Safety cards always ring.
 - `health.protect` / `health.home_assistant`: `null` when the engine isn't set up to use it.
 - `health.listener`: `on` or `off`.
 - `stories`: a counter that goes up whenever any story or "That's fine" changes; fetch the
@@ -107,7 +108,9 @@ replaces the earlier one on the phone.
  "reply": "...", "shadow": false}
 ```
 
-- `alert: false` or `shadow: true`: update quietly (no sound), never interrupt.
+- `shadow: true` (alerts are off): logbook and dashboard only, no phone alert; the integration
+  takes the story's earlier phone alert away, so none is left showing stale news.
+- `alert: false`: update quietly (no sound), never interrupt.
 - `level: "safety"` (smoke, CO, leak) and `level: "high"` with `alert: true`: urgent.
 - `snapshot` and `reply` are the engine's own addresses: the integration uses the picture and
   "That's fine" routes above instead.
