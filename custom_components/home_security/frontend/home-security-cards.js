@@ -57,24 +57,30 @@ function when(iso) {
 }
 
 // Signed picture URLs live an hour; reuse each for 50 minutes, per source, so a re-render
-// never asks again. A failed request isn't remembered.
+// never asks again. Keyed by story and its `updated`, so a story that changes gets a fresh
+// picture. A failed request isn't remembered.
 const PICTURE_TTL = 50 * 60 * 1000;
 const pictureCache = new WeakMap();
 
-function cachedPictureUrl(source, id) {
+function pictureKey(story) {
+  return `${story.id}@${story.updated}`;
+}
+
+function cachedPictureUrl(source, story) {
+  const key = pictureKey(story);
   let cache = pictureCache.get(source);
   if (!cache) pictureCache.set(source, (cache = new Map()));
-  const hit = cache.get(id);
+  const hit = cache.get(key);
   if (hit && Date.now() - hit.at < PICTURE_TTL) return hit.url;
-  const url = Promise.resolve().then(() => source.pictureUrl(id));
-  cache.set(id, { at: Date.now(), url });
-  url.catch(() => forgetPictureUrl(source, id, url));
+  const url = Promise.resolve().then(() => source.pictureUrl(story.id));
+  cache.set(key, { at: Date.now(), url });
+  url.catch(() => forgetPictureUrl(source, key, url));
   return url;
 }
 
-function forgetPictureUrl(source, id, url) {
+function forgetPictureUrl(source, key, url) {
   const cache = pictureCache.get(source);
-  if (cache && (!url || cache.get(id)?.url === url)) cache.delete(id);
+  if (cache && (!url || cache.get(key)?.url === url)) cache.delete(key);
 }
 
 // The shared base: a shadow root, a source to follow, and a render on each update.
@@ -122,14 +128,15 @@ class HsElement extends HTMLElement {
   _draw() {
     this._used = new Set();
     this._render();
-    for (const id of this._pictures.keys()) if (!this._used.has(id)) this._pictures.delete(id);
+    for (const key of this._pictures.keys()) if (!this._used.has(key)) this._pictures.delete(key);
   }
-  // The story's <img>, made once and kept while the story stays on screen, so a state push
-  // never reloads it (no flicker). Null once its picture failed.
-  _picture(id, alt, style) {
-    this._used.add(id);
-    if (this._pictures.has(id)) {
-      const kept = this._pictures.get(id);
+  // The story's <img>, made once and kept while the story stays on screen unchanged, so a
+  // state push never reloads it (no flicker). Null once its picture failed.
+  _picture(story, alt, style) {
+    const key = pictureKey(story);
+    this._used.add(key);
+    if (this._pictures.has(key)) {
+      const kept = this._pictures.get(key);
       kept?.setAttribute("alt", alt);
       return kept;
     }
@@ -140,16 +147,16 @@ class HsElement extends HTMLElement {
       if (failed) return;
       failed = true;
       picture.remove();
-      if (this._pictures.get(id) === picture) this._pictures.set(id, null);
-      forgetPictureUrl(source, id, url);
+      if (this._pictures.get(key) === picture) this._pictures.set(key, null);
+      forgetPictureUrl(source, key, url);
     };
     picture.addEventListener("error", () => fail());
-    const url = cachedPictureUrl(source, id);
+    const url = cachedPictureUrl(source, story);
     url.then(
       (src) => (picture.src = src),
       () => fail(url),
     );
-    this._pictures.set(id, picture);
+    this._pictures.set(key, picture);
     return picture;
   }
   _paint(...nodes) {
@@ -179,7 +186,7 @@ class HsStory extends HsElement {
     const story = live[0];
     const level = LEVELS[story.level] || LEVELS.watch;
     const picture = this._picture(
-      story.id,
+      story,
       story.title,
       "display:block;width:100%;aspect-ratio:16/9;object-fit:cover;background:#37474F",
     );
@@ -224,7 +231,7 @@ class HsWeek extends HsElement {
       const detail = [];
       if (open) {
         const picture = this._picture(
-          story.id,
+          story,
           "",
           "display:block;width:100%;border-radius:8px;margin-top:8px;background:#37474F",
         );

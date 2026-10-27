@@ -90,12 +90,36 @@ test("a push for the same story keeps the same picture and asks for its URL once
   const img = card.shadowRoot.querySelector("img");
   assert.equal(img.src, "/signed/A/1");
 
-  source.push([story("A", { title: "Changed", updated: "2026-10-27T09:20:00Z" })]);
+  source.push([story("A", { title: "Changed", live: true })]);
   await settle();
   assert.equal(card.shadowRoot.querySelector("img"), img);
   assert.equal(img.src, "/signed/A/1");
   assert.equal(img.getAttribute("alt"), "Changed");
   assert.deepEqual(source.asked, ["A"]);
+});
+
+test("a story that changes (new `updated`) gets a fresh picture", async () => {
+  const source = fakeSource();
+  const card = mount("hs-story", source);
+  source.push([story("A")]);
+  await settle();
+  const first = card.shadowRoot.querySelector("img");
+
+  source.push([story("A", { updated: "2026-10-27T09:20:00Z" })]);
+  await settle();
+  const second = card.shadowRoot.querySelector("img");
+  assert.notEqual(second, first);
+  assert.equal(second.src, "/signed/A/2");
+  assert.deepEqual(source.asked, ["A", "A"]);
+
+  // The week list asks for the same new version: shared, not asked again.
+  const week = mount("hs-week", source);
+  source.push([story("A", { updated: "2026-10-27T09:20:00Z" })]);
+  await settle();
+  week.shadowRoot.querySelectorAll("div").find((d) => d.getAttribute("role") === "button").dispatch("click");
+  await settle();
+  assert.equal(week.shadowRoot.querySelector("img").src, "/signed/A/2");
+  assert.deepEqual(source.asked, ["A", "A"]);
 });
 
 test("a new story gets its own picture", async () => {
