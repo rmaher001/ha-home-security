@@ -30,8 +30,9 @@ async def test_mark_fine_service_errors(
     hass: HomeAssistant, engine: FakeEngine, config_entry: MockConfigEntry
 ) -> None:
     await setup_integration(hass, config_entry)
-    with pytest.raises(ServiceValidationError):
-        await hass.services.async_call(DOMAIN, "mark_fine", {"story_id": "../x"}, blocking=True)
+    for bad in ("../x", f"{STORY['id']}\n", ""):
+        with pytest.raises(ServiceValidationError):
+            await hass.services.async_call(DOMAIN, "mark_fine", {"story_id": bad}, blocking=True)
     with pytest.raises(HomeAssistantError):
         await hass.services.async_call(
             DOMAIN, "mark_fine", {"story_id": "01JBNOSUCH"}, blocking=True
@@ -184,8 +185,9 @@ async def test_ws_picture_url(
     assert resp.status == 200
     assert await resp.read() == PICTURE
 
-    await client.send_json_auto_id({"type": "home_security/picture_url", "story_id": "../x"})
-    assert not (await client.receive_json())["success"]
+    for bad in ("../x", f"{STORY['id']}\n"):
+        await client.send_json_auto_id({"type": "home_security/picture_url", "story_id": bad})
+        assert not (await client.receive_json())["success"]
 
 
 async def test_picture_view(

@@ -250,6 +250,7 @@ async def test_thats_fine_action(hass: HomeAssistant, engine: FakeEngine, phones
     await wait_for(lambda: ("POST", "fine", STORY_ID) in engine.calls)
 
     hass.bus.async_fire("mobile_app_notification_action", {"action": "HS_FINE::../x"})
+    hass.bus.async_fire("mobile_app_notification_action", {"action": f"HS_FINE::{STORY_ID}\n"})
     hass.bus.async_fire("mobile_app_notification_action", {"action": "SOMETHING_ELSE"})
     await hass.async_block_till_done()
     assert [c for c in engine.calls if c[1] == "fine"] == [("POST", "fine", STORY_ID)]

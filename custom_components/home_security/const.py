@@ -23,7 +23,8 @@ STORY_DAYS: Final = 7
 MODES: Final = ["auto", "home", "night", "away"]
 
 # Story ids from the engine are ULIDs; anything else never reaches a URL we build.
-STORY_ID_RE: Final = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+# \Z, not $: $ also matches before a trailing newline.
+STORY_ID_RE: Final = re.compile(r"\A[A-Za-z0-9_-]{1,64}\Z")
 
 ATTR_STORY_ID: Final = "story_id"
 SERVICE_MARK_FINE: Final = "mark_fine"
