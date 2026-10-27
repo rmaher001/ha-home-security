@@ -1,0 +1,149 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Pair with the Home Security engine",
+        "description": "On the engine's setup page, make a pairing code, then enter the engine's address and the code here.",
+        "data": {
+          "url": "Engine address",
+          "code": "Pairing code"
+        },
+        "data_description": {
+          "url": "For example http://192.0.2.10:8780",
+          "code": "Eight letters and digits, like ABCD-EF23. It works once, for 15 minutes."
+        }
+      },
+      "reauth_confirm": {
+        "title": "Pair again",
+        "description": "The engine at {url} no longer accepts this Home Assistant. Make a new pairing code on the engine's setup page and enter it here.",
+        "data": {
+          "code": "Pairing code"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Can't reach the engine at that address.",
+      "invalid_code": "The engine refused that code: it is wrong, used up or expired. Make a new one.",
+      "no_internal_url": "Set Home Assistant's local network URL first (Settings > System > Network), so the engine can send alerts to it.",
+      "unknown": "Something unexpected went wrong; see the logs."
+    },
+    "abort": {
+      "single_instance_allowed": "Home Security is already set up.",
+      "reauth_successful": "Paired again."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Alerts",
+        "data": {
+          "phones": "Phones that get alerts",
+          "dashboard": "Page a tap on an alert opens"
+        },
+        "data_description": {
+          "phones": "Phones with the Home Assistant app. None chosen means no phone alerts.",
+          "dashboard": "A dashboard path, for example /security."
+        }
+      }
+    }
+  },
+  "entity": {
+    "select": {
+      "mode": {
+        "name": "Mode",
+        "state": {
+          "auto": "Auto",
+          "home": "Home",
+          "night": "Night",
+          "away": "Away"
+        },
+        "state_attributes": {
+          "in_force": {
+            "name": "In force",
+            "state": {
+              "home": "Home",
+              "night": "Night",
+              "away": "Away"
+            }
+          },
+          "set_by_hand": {
+            "name": "Set by hand"
+          }
+        }
+      }
+    },
+    "switch": {
+      "alerts": {
+        "name": "Alerts"
+      }
+    },
+    "binary_sensor": {
+      "problem": {
+        "name": "Problem",
+        "state_attributes": {
+          "problems": { "name": "Problems" }
+        }
+      },
+      "protect": {
+        "name": "Protect"
+      },
+      "home_assistant_link": {
+        "name": "Home Assistant link"
+      }
+    },
+    "sensor": {
+      "ai": {
+        "name": "AI",
+        "state": {
+          "answering": "Answering",
+          "not_answering": "Not answering"
+        },
+        "state_attributes": {
+          "seconds": { "name": "Seconds" }
+        }
+      },
+      "ai_speed": {
+        "name": "AI speed"
+      },
+      "cameras_connected": {
+        "name": "Cameras connected",
+        "state_attributes": {
+          "total": { "name": "Total" }
+        }
+      },
+      "sound_listener": {
+        "name": "Sound listener",
+        "state": {
+          "on": "On",
+          "off": "Off"
+        }
+      }
+    }
+  },
+  "services": {
+    "mark_fine": {
+      "name": "That's fine",
+      "description": "Tell the engine a story is fine.",
+      "fields": {
+        "story_id": {
+          "name": "Story",
+          "description": "The story's id."
+        }
+      }
+    }
+  },
+  "exceptions": {
+    "not_loaded": {
+      "message": "Home Security isn't connected to its engine."
+    },
+    "invalid_story": {
+      "message": "That isn't a story id."
+    },
+    "story_not_found": {
+      "message": "The engine has no story {story_id}."
+    },
+    "engine_error": {
+      "message": "The engine couldn't do that: {error}"
+    }
+  }
+}

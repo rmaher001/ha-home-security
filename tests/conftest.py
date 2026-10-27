@@ -207,9 +207,9 @@ def config_entry(engine: FakeEngine) -> MockConfigEntry:
     )
 
 
-async def wait_for(predicate, timeout: float = 3.0) -> None:
+async def wait_for(predicate, limit: float = 3.0) -> None:
     """Poll until predicate() is true (for socket-driven updates)."""
-    async with asyncio.timeout(timeout):
+    async with asyncio.timeout(limit):
         while not predicate():
             await asyncio.sleep(0.01)
 
