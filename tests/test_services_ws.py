@@ -226,7 +226,7 @@ async def test_cards_file_served_under_versioned_name(
     http = await hass_client()
     resp = await http.get(url)
     assert resp.status == 200
-    assert "home-security-cards" in await resp.text()
+    assert 'customElements.define("home-security-card"' in await resp.text()
 
     # A reload doesn't register the static path twice (that would raise).
     assert await hass.config_entries.async_reload(config_entry.entry_id)

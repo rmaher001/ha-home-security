@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -124,9 +125,11 @@ class EngineClient:
     async def async_ws_connect(self) -> aiohttp.ClientWebSocketResponse:
         """Open the state websocket. A refused token raises EngineAuthError."""
         try:
-            return await self._session.ws_connect(
-                f"{self.url}/api/v1/ws", headers=self.headers, heartbeat=30
-            )
+            # A bounded connect, so an engine that never answers can't stall a retry.
+            async with asyncio.timeout(15):
+                return await self._session.ws_connect(
+                    f"{self.url}/api/v1/ws", headers=self.headers, heartbeat=30
+                )
         except aiohttp.WSServerHandshakeError as err:
             if err.status == 401:
                 raise EngineAuthError("the engine refused the token") from err
