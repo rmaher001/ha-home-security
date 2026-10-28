@@ -43,7 +43,7 @@ sound requests to `webhook_url`, signed with `webhook_secret`.
     "protect": true,
     "cameras": {"connected": 9, "total": 10},
     "listener": "on",
-    "ai": {"ok": true, "seconds": 7.5, "last": "2026-10-27T22:01:00+00:00"}
+    "ai": {"on": true, "ok": true, "seconds": 7.5, "last": "2026-10-27T22:01:00+00:00"}
   },
   "stories": 42
 }
@@ -56,6 +56,8 @@ sound requests to `webhook_url`, signed with `webhook_secret`.
   dashboard only, with no phone alerts. Safety cards always ring.
 - `health.protect` / `health.home_assistant`: `null` when the engine isn't set up to use it.
 - `health.listener`: `on` or `off`.
+- `health.ai.on`: false when the engine runs without its AI judge (no model set for stories);
+  `ok` is then true and nothing is judged.
 - `stories`: a counter that goes up whenever any story or "That's fine" changes; fetch the
   stories again when it moves.
 

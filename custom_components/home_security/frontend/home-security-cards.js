@@ -361,11 +361,13 @@ class HsHealth extends HsElement {
     const health = this._data?.state?.health;
     if (!health) return this._paint(el("div", { class: "card" }, el("h2", {}, "Is the system healthy?")));
     const rows = [["Overall", health.ok, health.ok ? "Working" : health.problems.join("; ")]];
-    rows.push([
-      "AI",
-      health.ai.ok,
-      health.ai.ok ? (health.ai.seconds != null ? `Answering · ${Math.round(health.ai.seconds)} s per look` : "Answering") : "Not answering",
-    ]);
+    if (health.ai.on === false) rows.push(["AI", true, "Off"]);
+    else
+      rows.push([
+        "AI",
+        health.ai.ok,
+        health.ai.ok ? (health.ai.seconds != null ? `Answering · ${Math.round(health.ai.seconds)} s per look` : "Answering") : "Not answering",
+      ]);
     const cams = health.cameras;
     rows.push(["Cameras", cams.connected === cams.total, `${cams.connected} of ${cams.total} connected`]);
     rows.push(["Sound listener", true, health.listener === "on" ? "Running" : "Off"]);

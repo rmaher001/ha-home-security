@@ -222,3 +222,17 @@ test("dashboard cards on one connection share one source, so one URL request", a
   assert.equal(asked.filter((m) => m.type === "home_security/picture_url").length, 1);
   for (const card of cards) assert.equal(card._parts[0].shadowRoot.querySelector("img").src, "/signed/A");
 });
+
+test("the health card says the AI is off when the engine runs without it", async () => {
+  const source = fakeSource();
+  source.push = function () {
+    const state = { ...STATE, health: { ...STATE.health, ai: { on: false, ok: true, seconds: null, last: null } } };
+    for (const cb of this.listeners) cb({ state, stories: [], connected: true });
+  };
+  const card = mount("hs-health", source);
+  source.push();
+  await settle();
+  const text = card.shadowRoot.textContent;
+  assert.match(text, /AI\s*Off/);
+  assert.doesNotMatch(text, /Answering/);
+});
