@@ -170,8 +170,12 @@ class SensorPusher:
             try:
                 await client.async_post_sensors(snapshot=snapshot, states=states)
             except EngineWantsSnapshot:
-                # The engine restarted and has nothing to merge changes into: tell it all.
-                self._async_snapshot()
+                if snapshot:
+                    # A snapshot is what it asked for; refusing one is just a failure.
+                    self._async_retry_soon()
+                else:
+                    # The engine restarted and has nothing to merge changes into: tell it all.
+                    self._async_snapshot()
             except EngineError as err:
                 if not snapshot:
                     self._async_retry_soon()

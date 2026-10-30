@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
 from typing import Any
 
@@ -249,3 +250,24 @@ async def test_a_409_gets_a_snapshot_at_once(
     assert [p["snapshot"] for p in engine.sensor_posts] == [False, True]
     assert by_id(engine.sensor_posts[1])["lock.front"]["state"] == "unlocked"
     assert "Couldn't send" not in caplog.text
+
+
+async def test_a_409_on_a_snapshot_does_not_start_another_at_once(
+    hass: HomeAssistant, engine: FakeEngine, config_entry: MockConfigEntry, house: None
+) -> None:
+    """Only a change push turns a 409 into a snapshot; a refused snapshot waits for the retry."""
+    engine.sensors_status = 409
+    await setup_integration(hass, config_entry)
+    await wait_for(lambda: engine.sensor_posts)
+    await hass.async_block_till_done()
+    await asyncio.sleep(0.3)
+    before = len(engine.sensor_posts)  # the start-up snapshot and the connect one
+    await asyncio.sleep(0.3)
+    assert len(engine.sensor_posts) == before  # no snapshot chasing its own refusal
+    assert all(p["snapshot"] for p in engine.sensor_posts)
+
+    engine.sensors_status = 204
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=15))
+    await hass.async_block_till_done()
+    await wait_for(lambda: len(engine.sensor_posts) == before + 1)
+    assert engine.sensor_posts[-1]["snapshot"] is True

@@ -43,6 +43,8 @@ _LOGGER = logging.getLogger(__name__)
 
 CHUNK = 64 * 1024
 MAX_OUTSTANDING = 200  # tickets or sessions held at once; the oldest go first
+MAX_PER_USER = 20  # sessions or tickets one person may hold at once
+RECHECK_SECONDS = 60  # how often an open connection is checked against its session
 MAX_BODY = 1024 * 1024  # the most a browser may send through
 UPSTREAM_TIMEOUT = aiohttp.ClientTimeout(total=None, sock_connect=15, sock_read=120)
 SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
@@ -115,6 +117,7 @@ class AppAccess:
     def new_ticket(self, user_id: str, refresh_token_id: str | None) -> str:
         now = self.clock()
         self._prune(now)
+        _make_room(self._tickets, user_id, lambda held: held[1])
         ticket = secrets.token_urlsafe(32)
         self._tickets[ticket] = (now + APP_TICKET_SECONDS, user_id, refresh_token_id)
         return ticket
@@ -126,21 +129,23 @@ class AppAccess:
         if held is None or held[0] < now:
             return None
         self._prune(now)
+        _make_room(self._sessions, held[1], lambda one: one.user_id)
         session = secrets.token_urlsafe(32)
         self._sessions[session] = Session(held[1], held[2], now, now)
         return session
 
-    async def valid(self, session_id: str | None) -> Session | None:
+    async def valid(self, session_id: str | None, *, live: bool = False) -> Session | None:
         """The session, if it is still good; using it renews its idle time.
 
         Good means: used within 12 hours, younger than 24, and the person still exists, is
-        active, and the login they came in with hasn't been revoked.
+        active, and the login they came in with hasn't been revoked. With live=True (an open
+        connection being checked) idle time doesn't count and nothing is renewed.
         """
         now = self.clock()
         session = self._sessions.get(session_id) if session_id else None
         if session is None:
             return None
-        if now - session.last > APP_SESSION_IDLE_SECONDS or (
+        if (not live and now - session.last > APP_SESSION_IDLE_SECONDS) or (
             now - session.created > APP_SESSION_MAX_SECONDS
         ):
             del self._sessions[session_id]
@@ -152,19 +157,35 @@ class AppAccess:
         if user is None or not user.is_active or revoked:
             self._sessions.pop(session_id, None)
             return None
-        if session_id in self._sessions:
+        if not live and session_id in self._sessions:
             session.last = now
             self._sessions.move_to_end(session_id)
         return session
 
     @contextlib.contextmanager
-    def track(self, close: Callable[[], None]) -> Iterator[None]:
-        """Note a relay or a streaming answer, so ending the sessions can cut it off."""
+    def track(self, session_id: str, close: Callable[[], None]) -> Iterator[None]:
+        """Note a relay or a streaming answer, so it can be cut off.
+
+        Ending the sessions cuts it, and so does its own session going bad: it is re-checked
+        about every minute, and no later than the session's absolute end.
+        """
         self._live.add(close)
+        watcher = asyncio.ensure_future(self._watch(session_id, close))
         try:
             yield
         finally:
+            watcher.cancel()
             self._live.discard(close)
+
+    async def _watch(self, session_id: str, close: Callable[[], None]) -> None:
+        while True:
+            session = self._sessions.get(session_id)
+            remaining = session.created + APP_SESSION_MAX_SECONDS - self.clock() if session else 0.0
+            await asyncio.sleep(max(0.01, min(RECHECK_SECONDS, remaining)))
+            if await self.valid(session_id, live=True) is None:
+                with contextlib.suppress(Exception):
+                    close()
+                return
 
     def clear(self) -> None:
         """End every session and ticket, and cut every live connection."""
@@ -184,6 +205,13 @@ class AppAccess:
         for held in (self._tickets, self._sessions):
             while len(held) >= MAX_OUTSTANDING:
                 held.popitem(last=False)
+
+
+def _make_room(held: OrderedDict[str, Any], user_id: str, owner: Callable[[Any], str]) -> None:
+    """Drop a person's oldest entries so they hold fewer than MAX_PER_USER."""
+    mine = [key for key, value in held.items() if owner(value) == user_id]
+    for key in mine[: max(0, len(mine) - MAX_PER_USER + 1)]:
+        del held[key]
 
 
 def async_get_app_access(hass: HomeAssistant) -> AppAccess:
@@ -321,7 +349,8 @@ class AppProxyView(HomeAssistantView):
     async def handle(self, request: web.Request, path: str) -> web.StreamResponse:
         hass = request.app[KEY_HASS]
         access = async_get_app_access(hass)
-        session = await access.valid(request.cookies.get(APP_COOKIE))
+        session_id = request.cookies.get(APP_COOKIE)
+        session = await access.valid(session_id)
         if session is None:
             return web.Response(
                 status=HTTPStatus.FORBIDDEN,
@@ -344,6 +373,8 @@ class AppProxyView(HomeAssistantView):
         client = coordinator.client
 
         is_socket = request.headers.get("Upgrade", "").lower() == "websocket"
+        if is_socket and rest != "api/v1/ws":
+            return web.Response(status=HTTPStatus.NOT_FOUND)  # only the engine's socket route
         if request.method not in SAFE_METHODS and not _same_origin(request):
             return web.Response(status=HTTPStatus.FORBIDDEN, text="Cross-site request refused.")
         if is_socket and "Origin" in request.headers and not _same_origin(request):
@@ -363,8 +394,8 @@ class AppProxyView(HomeAssistantView):
         headers.update(client.headers)  # the paired key, added here
 
         if is_socket:
-            return await self._socket(request, access, client, upstream_url, headers)
-        return await self._plain(request, access, client, upstream_url, headers)
+            return await self._socket(request, access, session_id, client, upstream_url, headers)
+        return await self._plain(request, access, session_id, client, upstream_url, headers)
 
     get = post = put = patch = delete = head = handle
 
@@ -372,6 +403,7 @@ class AppProxyView(HomeAssistantView):
         self,
         request: web.Request,
         access: AppAccess,
+        session_id: str | None,
         client: Any,
         upstream_url: URL,
         headers: dict[str, str],
@@ -411,7 +443,7 @@ class AppProxyView(HomeAssistantView):
                 response = web.StreamResponse(status=upstream.status, headers=out_headers)
                 await response.prepare(request)
                 transport = request.transport
-                with access.track(lambda: transport and transport.close()):
+                with access.track(session_id or "", lambda: transport and transport.close()):
                     if request.method != "HEAD":
                         async for chunk in upstream.content.iter_chunked(CHUNK):
                             await response.write(chunk)
@@ -429,6 +461,7 @@ class AppProxyView(HomeAssistantView):
         self,
         request: web.Request,
         access: AppAccess,
+        session_id: str | None,
         client: Any,
         upstream_url: URL,
         headers: dict[str, str],
@@ -460,7 +493,7 @@ class AppProxyView(HomeAssistantView):
             asyncio.ensure_future(pump(downstream, upstream)),
         ]
         try:
-            with access.track(lambda: hass.async_create_task(downstream.close())):
+            with access.track(session_id or "", lambda: hass.async_create_task(downstream.close())):
                 await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         finally:
             for task in tasks:

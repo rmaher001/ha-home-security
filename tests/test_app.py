@@ -15,6 +15,7 @@ from pytest_homeassistant_custom_component.typing import (
     WebSocketGenerator,
 )
 
+from custom_components.home_security import app_proxy
 from custom_components.home_security.app_proxy import (
     AppAccess,
     _rewrite_location,
@@ -634,3 +635,103 @@ async def test_an_engine_that_is_down_answers_502(
 )
 def test_a_redirect_is_rewritten_by_its_parsed_address(location: str, want: str) -> None:
     assert _rewrite_location(location, "http://engine.test:8780") == want
+
+
+# --- connections that are already open ------------------------------------------------------
+
+
+@pytest.fixture
+def quick_checks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Re-check open connections every 50 ms instead of every minute."""
+    monkeypatch.setattr(app_proxy, "RECHECK_SECONDS", 0.05)
+
+
+async def closed_soon(ws) -> bool:
+    async with asyncio.timeout(3):
+        msg = await ws.receive()
+    return msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED)
+
+
+async def test_an_open_socket_closes_when_its_user_is_deactivated(
+    hass: HomeAssistant, engine: FakeEngine, member, hass_read_only_user, quick_checks: None
+) -> None:
+    async with member.ws_connect(f"{BASE}/api/v1/ws") as ws:
+        assert (await ws.receive_json())["type"] == "state"
+        await hass.auth.async_update_user(hass_read_only_user, is_active=False)
+        assert await closed_soon(ws)
+
+
+async def test_an_open_socket_closes_when_its_login_is_revoked(
+    hass: HomeAssistant,
+    engine: FakeEngine,
+    member,
+    hass_read_only_access_token: str,
+    quick_checks: None,
+) -> None:
+    async with member.ws_connect(f"{BASE}/api/v1/ws") as ws:
+        assert (await ws.receive_json())["type"] == "state"
+        refresh = hass.auth.async_validate_access_token(hass_read_only_access_token)
+        hass.auth.async_remove_refresh_token(refresh)
+        assert await closed_soon(ws)
+
+
+async def test_an_open_socket_closes_at_the_end_of_the_day(
+    hass: HomeAssistant, engine: FakeEngine, browser, clock: Clock, quick_checks: None
+) -> None:
+    async with browser.ws_connect(f"{BASE}/api/v1/ws") as ws:
+        assert (await ws.receive_json())["type"] == "state"
+        clock.now += 25 * HOUR
+        assert await closed_soon(ws)
+
+
+async def test_an_open_socket_is_not_idle(
+    hass: HomeAssistant, engine: FakeEngine, browser, clock: Clock, quick_checks: None
+) -> None:
+    """A connection that stays open is use; only the 24 hour limit ends it."""
+    async with browser.ws_connect(f"{BASE}/api/v1/ws") as ws:
+        assert (await ws.receive_json())["type"] == "state"
+        clock.now += 13 * HOUR
+        await asyncio.sleep(0.3)
+        await engine.push({**engine.state, "alerts": False})
+        async with asyncio.timeout(3):
+            assert (await ws.receive_json())["state"]["alerts"] is False
+
+
+async def test_an_open_stream_is_cut_when_its_user_is_deactivated(
+    hass: HomeAssistant, engine: FakeEngine, member, hass_read_only_user, quick_checks: None
+) -> None:
+    resp = await member.get(f"{BASE}/page/home-security-cards-slow.js")
+    assert await resp.content.readany() == b"first"
+    await hass.auth.async_update_user(hass_read_only_user, is_active=False)
+    async with asyncio.timeout(3):
+        try:
+            rest = await resp.content.read()
+        except ClientError, OSError:
+            rest = b""
+    assert rest == b""
+
+
+async def test_one_user_cannot_push_out_everyone_elses_sessions(
+    hass: HomeAssistant, clock: Clock
+) -> None:
+    access = AppAccess(hass, clock)
+    kept = access.redeem(access.new_ticket("bystander", "r0"))
+    greedy = [access.redeem(access.new_ticket("greedy", "r1")) for _ in range(300)]
+    assert kept in access._sessions
+    mine = [s for s in access._sessions.values() if s.user_id == "greedy"]
+    assert len(mine) == 20
+    assert greedy[-1] in access._sessions
+    assert greedy[0] not in access._sessions
+    for _ in range(300):
+        access.new_ticket("greedy", "r1")
+    assert sum(1 for t in access._tickets.values() if t[1] == "greedy") == 20
+
+
+async def test_only_the_engines_socket_route_takes_an_upgrade(
+    hass: HomeAssistant, engine: FakeEngine, browser
+) -> None:
+    engine.echoes.clear()
+    upgrade = {"Upgrade": "websocket", "Connection": "Upgrade", "Sec-WebSocket-Version": "13"}
+    for path in ("api/v1/state", "api/v1/stories", "", "page/setup"):
+        assert await raw(browser, "GET", path, upgrade) == 404, path
+    assert engine.echoes == []

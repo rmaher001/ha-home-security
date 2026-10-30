@@ -151,7 +151,9 @@ and `Authorization: Bearer <paired key>` counts as signed in. `?story=<id>` open
 - A session belongs to the Home Assistant user and login that asked for the ticket. It ends
   when that user is removed or deactivated or that login is revoked, after 12 idle hours, after
   24 hours in all, when the integration unloads or pairs again. Ending a session cuts its open
-  websocket and streaming connections. Tickets are limited to 10 a minute per connection.
+  websocket and streaming connections, and each open connection is re-checked about every
+  minute, so it can't outlive its session. One person holds at most 20 sessions. Only
+  `api/v1/ws` may be a websocket; an upgrade anywhere else is `404`. Tickets are limited to 10 a minute per connection.
 - The key never appears in a URL, in a response or in the browser.
 
 ## Cards (engine → integration webhook)
