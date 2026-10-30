@@ -275,3 +275,29 @@ async def test_an_engine_that_is_down_answers_502(
 ) -> None:
     config_entry.runtime_data.client.url = "http://127.0.0.1:1"  # nothing listens there
     assert (await browser.get(f"{BASE}/echo/x")).status == 502
+
+
+async def test_the_bare_app_address_gets_its_slash(
+    hass: HomeAssistant, clock: Clock, hass_client_no_auth: ClientSessionGenerator
+) -> None:
+    """The engine's page uses relative links, so it must be served from a path ending in /."""
+    client = await hass_client_no_auth()
+    resp = await client.get("/api/home_security/app?story=01JB", allow_redirects=False)
+    assert resp.status == 308
+    assert resp.headers["Location"] == f"{BASE}/?story=01JB"
+    resp = await client.get("/api/home_security/app", allow_redirects=False)
+    assert resp.headers["Location"] == f"{BASE}/"
+
+
+async def test_the_session_lands_on_the_slash_form(
+    hass: HomeAssistant,
+    clock: Clock,
+    hass_client_no_auth: ClientSessionGenerator,
+    hass_ws_client: WebSocketGenerator,
+) -> None:
+    for nxt, want in (("", f"{BASE}/"), ("?story=01JB", f"{BASE}/?story=01JB")):
+        t = await ticket(hass, hass_ws_client)
+        resp = await (await hass_client_no_auth()).get(
+            f"{BASE}/_session", params={"ticket": t, "next": nxt}, allow_redirects=False
+        )
+        assert resp.headers["Location"] == want

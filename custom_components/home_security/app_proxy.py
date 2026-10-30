@@ -180,6 +180,21 @@ class SessionView(HomeAssistantView):
         return response
 
 
+class AppRootView(HomeAssistantView):
+    """/api/home_security/app → /api/home_security/app/ (the page's links are relative)."""
+
+    url = APP_BASE.rstrip("/")
+    name = "api:home_security:app_root"
+    requires_auth = False
+
+    async def get(self, request: web.Request) -> web.Response:
+        query = request.rel_url.raw_query_string
+        return web.Response(
+            status=HTTPStatus.PERMANENT_REDIRECT,
+            headers={"Location": f"{APP_BASE}?{query}" if query else APP_BASE},
+        )
+
+
 class AppProxyView(HomeAssistantView):
     """Every method under /api/home_security/app/, passed to the engine."""
 

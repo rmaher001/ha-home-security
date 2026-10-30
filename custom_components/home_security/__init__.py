@@ -20,7 +20,7 @@ from homeassistant.helpers.typing import ConfigType
 
 from .alerts import async_setup_alerts
 from .api import EngineAuthError, EngineClient, EngineError, EngineNotFound
-from .app_proxy import AppProxyView, SessionView, async_get_app_access
+from .app_proxy import AppProxyView, AppRootView, SessionView, async_get_app_access
 from .const import (
     ATTR_STORY_ID,
     CONF_TOKEN,
@@ -66,6 +66,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     async_register_commands(hass)
     hass.http.register_view(PictureView())
     hass.http.register_view(SessionView())  # before the catch-all, which would swallow it
+    hass.http.register_view(AppRootView())
     hass.http.register_view(AppProxyView())
     await async_register_cards(hass)
     hass.data[PANEL_MODULE_KEY] = await async_serve_panel(hass)
