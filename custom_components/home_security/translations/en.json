@@ -50,12 +50,10 @@
       "init": {
         "title": "Alerts",
         "data": {
-          "phones": "Phones that get alerts",
-          "dashboard": "Page a tap on an alert opens"
+          "phones": "Phones that get alerts"
         },
         "data_description": {
-          "phones": "Phones with the Home Assistant app. None chosen means no phone alerts.",
-          "dashboard": "A dashboard path, for example /my-dashboard/security."
+          "phones": "Phones with the Home Assistant app. None chosen means no phone alerts."
         }
       }
     }

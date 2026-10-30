@@ -14,9 +14,7 @@ CONF_TOKEN: Final = "token"
 CONF_WEBHOOK_ID: Final = "webhook_id"
 CONF_WEBHOOK_SECRET: Final = "webhook_secret"
 CONF_PHONES: Final = "phones"
-CONF_DASHBOARD: Final = "dashboard"
 
-DEFAULT_DASHBOARD: Final = "/my-dashboard/security"
 PAIR_NAME: Final = "Home Assistant"
 STORY_DAYS: Final = 7
 
@@ -30,6 +28,7 @@ ATTR_STORY_ID: Final = "story_id"
 SERVICE_MARK_FINE: Final = "mark_fine"
 
 PICTURE_URL: Final = "/api/home_security/picture/{story_id}"
+PANEL_URL_PATH_PREFIX: Final = "/home-security"
 FRONTEND_URL_BASE: Final = "/home_security_frontend"
 CARDS_FILE: Final = "home-security-cards.js"
 

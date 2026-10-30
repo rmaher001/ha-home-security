@@ -1,4 +1,4 @@
-"""Config flow: pair with the engine; options: phones and dashboard."""
+"""Config flow: pair with the engine; options: phones."""
 
 from __future__ import annotations
 
@@ -30,13 +30,11 @@ from homeassistant.helpers.selector import (
 from .api import EngineCodeRefused, EngineConnectionError, EngineError, async_pair
 from .const import (
     CONF_CODE,
-    CONF_DASHBOARD,
     CONF_PHONES,
     CONF_TOKEN,
     CONF_URL,
     CONF_WEBHOOK_ID,
     CONF_WEBHOOK_SECRET,
-    DEFAULT_DASHBOARD,
     DOMAIN,
     NAME,
     PAIR_NAME,
@@ -192,15 +190,12 @@ class HomeSecurityConfigFlow(ConfigFlow, domain=DOMAIN):
 
 
 class HomeSecurityOptionsFlow(OptionsFlow):
-    """Which phones get alerts, and where a tap on one leads."""
+    """Which phones get alerts."""
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         if user_input is not None:
             return self.async_create_entry(
-                data={
-                    CONF_PHONES: list(user_input.get(CONF_PHONES, [])),
-                    CONF_DASHBOARD: user_input.get(CONF_DASHBOARD) or DEFAULT_DASHBOARD,
-                }
+                data={CONF_PHONES: list(user_input.get(CONF_PHONES, []))}
             )
 
         chosen = list(self.config_entry.options.get(CONF_PHONES, []))
@@ -214,10 +209,6 @@ class HomeSecurityOptionsFlow(OptionsFlow):
                         options=phones, multiple=True, mode=SelectSelectorMode.LIST
                     )
                 ),
-                vol.Optional(
-                    CONF_DASHBOARD,
-                    default=self.config_entry.options.get(CONF_DASHBOARD, DEFAULT_DASHBOARD),
-                ): str,
             }
         )
         return self.async_show_form(step_id="init", data_schema=schema)

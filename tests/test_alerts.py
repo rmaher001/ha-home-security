@@ -16,7 +16,7 @@ from homeassistant.exceptions import HomeAssistantError
 from pytest_homeassistant_custom_component.common import MockConfigEntry, async_capture_events
 from pytest_homeassistant_custom_component.typing import ClientSessionGenerator
 
-from custom_components.home_security.const import CONF_DASHBOARD, CONF_PHONES
+from custom_components.home_security.const import CONF_PHONES
 
 from .conftest import STORY, WEBHOOK_ID, WEBHOOK_SECRET, FakeEngine, setup_integration, wait_for
 
@@ -94,7 +94,7 @@ async def phones(hass: HomeAssistant, engine: FakeEngine, config_entry: MockConf
     fake = Phones(hass)
     config_entry.add_to_hass(hass)
     hass.config_entries.async_update_entry(
-        config_entry, options={CONF_PHONES: [IPHONE, ANDROID], CONF_DASHBOARD: "/security"}
+        config_entry, options={CONF_PHONES: [IPHONE, ANDROID], "dashboard": "/security"}
     )
     await setup_integration(hass, config_entry)
     return fake
@@ -259,7 +259,7 @@ async def test_urgent_card_ios(phones: Phones, post) -> None:
     data = sent["data"]
     assert data["tag"] == f"hs-{STORY_ID}"
     assert data["group"] == "home-security"
-    assert data["url"] == f"/security?story={STORY_ID}"
+    assert data["url"] == f"/home-security?story={STORY_ID}"
     assert data["image"].startswith(f"/api/home_security/picture/{STORY_ID}?authSig=")
     assert data["actions"] == [{"action": f"HS_FINE::{STORY_ID}", "title": "That's fine"}]
     assert data["push"] == {
@@ -275,7 +275,7 @@ async def test_urgent_card_android(phones: Phones, post) -> None:
     data = sent["data"]
     assert data["tag"] == f"hs-{STORY_ID}"
     assert data["group"] == "home-security"
-    assert data["clickAction"] == f"/security?story={STORY_ID}"
+    assert data["clickAction"] == f"/home-security?story={STORY_ID}"
     assert data["channel"] == "alarm_stream"
     assert data["importance"] == "high"
     assert data["priority"] == "high"
@@ -367,12 +367,15 @@ async def test_thats_fine_action(hass: HomeAssistant, engine: FakeEngine, phones
     assert [c for c in engine.calls if c[1] == "fine"] == [("POST", "fine", STORY_ID)]
 
 
-async def test_default_dashboard_link(
+async def test_tap_opens_the_sidebar_panel(
     hass: HomeAssistant, phones: Phones, config_entry: MockConfigEntry, post
 ) -> None:
-    hass.config_entries.async_update_entry(config_entry, options={CONF_PHONES: [IPHONE]})
+    """An entry saved with the old dashboard option still opens the panel, not that page."""
+    hass.config_entries.async_update_entry(
+        config_entry, options={CONF_PHONES: [IPHONE], "dashboard": "/my-dashboard/security"}
+    )
     assert await post(card()) == 200
-    assert phones.to(IPHONE)[0]["data"]["url"] == f"/my-dashboard/security?story={STORY_ID}"
+    assert phones.to(IPHONE)[0]["data"]["url"] == f"/home-security?story={STORY_ID}"
 
 
 async def test_resend_after_500_is_taken(phones: Phones, post) -> None:

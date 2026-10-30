@@ -22,16 +22,15 @@ from homeassistant.util import slugify
 
 from .api import EngineError
 from .const import (
-    CONF_DASHBOARD,
     CONF_PHONES,
     CONF_WEBHOOK_ID,
     CONF_WEBHOOK_SECRET,
-    DEFAULT_DASHBOARD,
     DOMAIN,
     FINE_ACTION_PREFIX,
     NAME,
     NOTIFY_GROUP,
     NOTIFY_TAG_PREFIX,
+    PANEL_URL_PATH_PREFIX,
     PICTURE_URL,
     STORY_ID_RE,
 )
@@ -154,14 +153,11 @@ def _is_android(hass: HomeAssistant, service: str) -> bool:
     return False
 
 
-def build_notification(
-    hass: HomeAssistant, service: str, card: dict[str, Any], dashboard: str
-) -> dict[str, Any]:
+def build_notification(hass: HomeAssistant, service: str, card: dict[str, Any]) -> dict[str, Any]:
     story = card["story"]
     level = card.get("level")
     loud = loudness(level, bool(card.get("alert")))
-    separator = "&" if "?" in dashboard else "?"
-    link = f"{dashboard}{separator}story={story}"
+    link = f"{PANEL_URL_PATH_PREFIX}?story={story}"
 
     data: dict[str, Any] = {"tag": f"{NOTIFY_TAG_PREFIX}{story}", "group": NOTIFY_GROUP}
     if level != "safety":
@@ -231,10 +227,8 @@ async def async_handle_card(
         sends = []
         to_clear.insert(0, story)
     else:
-        dashboard: str = entry.options.get(CONF_DASHBOARD) or DEFAULT_DASHBOARD
         sends = [
-            _async_notify(hass, phone, build_notification(hass, phone, card, dashboard))
-            for phone in phones
+            _async_notify(hass, phone, build_notification(hass, phone, card)) for phone in phones
         ]
     for clear_id in to_clear:
         clear = {"message": "clear_notification", "data": {"tag": f"{NOTIFY_TAG_PREFIX}{clear_id}"}}

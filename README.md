@@ -56,8 +56,9 @@ Open **Settings > Devices & services > Home Security > Configure**:
 
 - **Phones that get alerts**: pick the phones (they need the Home Assistant app). None
   chosen means no phone alerts.
-- **Page a tap on an alert opens**: a dashboard path, `/my-dashboard/security` by default. The story's
-  id is added, so the page can show that story.
+
+Tapping an alert opens the Home Security panel in the sidebar at that story
+(`/home-security?story=<id>`).
 
 ## Development
 

@@ -13,7 +13,6 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.home_security.const import (
     CONF_CODE,
-    CONF_DASHBOARD,
     CONF_PHONES,
     CONF_TOKEN,
     CONF_URL,
@@ -147,6 +146,7 @@ async def test_options(hass: HomeAssistant, config_entry: MockConfigEntry) -> No
     result = await hass.config_entries.options.async_init(config_entry.entry_id)
     assert result["type"] is FlowResultType.FORM
     schema = result["data_schema"].schema
+    options_schema = schema
     phones_key = next(k for k in schema if k == CONF_PHONES)
     options = schema[phones_key].config["options"]
     values = sorted(o["value"] if isinstance(o, dict) else o for o in options)
@@ -154,13 +154,11 @@ async def test_options(hass: HomeAssistant, config_entry: MockConfigEntry) -> No
 
     result = await hass.config_entries.options.async_configure(
         result["flow_id"],
-        {CONF_PHONES: ["mobile_app_alex_phone"], CONF_DASHBOARD: "/lovelace/security"},
+        {CONF_PHONES: ["mobile_app_alex_phone"]},
     )
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert config_entry.options == {
-        CONF_PHONES: ["mobile_app_alex_phone"],
-        CONF_DASHBOARD: "/lovelace/security",
-    }
+    assert config_entry.options == {CONF_PHONES: ["mobile_app_alex_phone"]}
+    assert "dashboard" not in [str(k) for k in options_schema]
 
 
 async def test_options_defaults(hass: HomeAssistant, config_entry: MockConfigEntry) -> None:
@@ -168,7 +166,21 @@ async def test_options_defaults(hass: HomeAssistant, config_entry: MockConfigEnt
     result = await hass.config_entries.options.async_init(config_entry.entry_id)
     result = await hass.config_entries.options.async_configure(result["flow_id"], {})
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert config_entry.options == {CONF_PHONES: [], CONF_DASHBOARD: "/my-dashboard/security"}
+    assert config_entry.options == {CONF_PHONES: []}
+
+
+async def test_options_drop_the_old_dashboard(
+    hass: HomeAssistant, config_entry: MockConfigEntry
+) -> None:
+    """An entry saved before the panel existed loses its dashboard option on the next save."""
+    config_entry.add_to_hass(hass)
+    hass.config_entries.async_update_entry(
+        config_entry, options={CONF_PHONES: [], "dashboard": "/my-dashboard/security"}
+    )
+    result = await hass.config_entries.options.async_init(config_entry.entry_id)
+    result = await hass.config_entries.options.async_configure(result["flow_id"], {})
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert config_entry.options == {CONF_PHONES: []}
 
 
 async def test_reconfigure(
