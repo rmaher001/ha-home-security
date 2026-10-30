@@ -12,7 +12,8 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 
 from .api import EngineError, EngineNotFound
-from .const import MODES, PICTURE_URL, SIGNAL_UPDATE, STORY_DAYS, STORY_ID_RE
+from .app_proxy import async_get_app_access
+from .const import APP_TICKET_SECONDS, MODES, PICTURE_URL, SIGNAL_UPDATE, STORY_DAYS, STORY_ID_RE
 from .coordinator import HomeSecurityCoordinator, async_get_coordinator
 
 STORY_ID = vol.All(str, vol.Match(STORY_ID_RE))
@@ -28,6 +29,7 @@ def async_register_commands(hass: HomeAssistant) -> None:
         ws_set_mode,
         ws_subscribe,
         ws_picture_url,
+        ws_app_session,
     ):
         websocket_api.async_register_command(hass, command)
 
@@ -150,3 +152,15 @@ def ws_picture_url(
     """A signed picture path an <img> tag can load without a login header."""
     path = PICTURE_URL.format(story_id=msg["story_id"])
     connection.send_result(msg["id"], {"url": async_sign_path(hass, path, PICTURE_URL_LIFETIME)})
+
+
+@websocket_api.websocket_command({vol.Required("type"): "home_security/app_session"})
+@callback
+def ws_app_session(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """A one-time ticket the panel trades for the app's session cookie (any logged-in user)."""
+    if not _coordinator(hass, connection, msg):
+        return
+    ticket = async_get_app_access(hass).new_ticket()
+    connection.send_result(msg["id"], {"ticket": ticket, "expires_in": APP_TICKET_SECONDS})

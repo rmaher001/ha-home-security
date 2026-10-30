@@ -1,4 +1,4 @@
-"""Runs the cards' JavaScript tests (tests/js) with Node's built-in test runner."""
+"""Runs the cards' and the panel's JavaScript tests (tests/js) with Node's built-in test runner."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ JS_TESTS = Path(__file__).parent / "js"
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node isn't installed")
 def test_cards_js() -> None:
     result = subprocess.run(
-        ["node", "--test", str(JS_TESTS / "cards.test.mjs")],
+        ["node", "--test", str(JS_TESTS / "cards.test.mjs"), str(JS_TESTS / "panel.test.mjs")],
         capture_output=True,
         text=True,
         timeout=60,

@@ -20,16 +20,23 @@ from homeassistant.helpers.typing import ConfigType
 
 from .alerts import async_setup_alerts
 from .api import EngineAuthError, EngineClient, EngineError, EngineNotFound
+from .app_proxy import AppProxyView, SessionView, async_get_app_access
 from .const import (
     ATTR_STORY_ID,
     CONF_TOKEN,
     CONF_URL,
     DOMAIN,
+    PANEL_MODULE_KEY,
     SERVICE_MARK_FINE,
     STORY_ID_RE,
 )
 from .coordinator import HomeSecurityCoordinator, async_get_coordinator
-from .frontend import async_register_cards
+from .frontend import (
+    async_register_cards,
+    async_register_panel,
+    async_remove_panel,
+    async_serve_panel,
+)
 from .sensors import async_setup_sensors
 from .views import PictureView
 from .websocket import async_register_commands
@@ -58,7 +65,10 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     )
     async_register_commands(hass)
     hass.http.register_view(PictureView())
+    hass.http.register_view(SessionView())  # before the catch-all, which would swallow it
+    hass.http.register_view(AppProxyView())
     await async_register_cards(hass)
+    hass.data[PANEL_MODULE_KEY] = await async_serve_panel(hass)
     return True
 
 
@@ -100,6 +110,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: HomeSecurityConfigEntry)
     entry.async_on_unload(coordinator.async_stop)
     async_setup_alerts(hass, entry)
     async_setup_sensors(hass, entry)
+    await async_register_panel(hass, hass.data[PANEL_MODULE_KEY])
+    entry.async_on_unload(lambda: async_remove_panel(hass))
+    # Sessions end with the entry: an unload, a reload or pairing again all close the app.
+    entry.async_on_unload(async_get_app_access(hass).clear)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 

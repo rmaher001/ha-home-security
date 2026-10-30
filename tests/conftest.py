@@ -71,6 +71,7 @@ class FakeEngine:
         self.ws_refuse_auth = False
         self.sensor_posts: list[dict[str, Any]] = []
         self.sensors_status = 204
+        self.echoes: list[dict[str, Any]] = []
         self.server: TestServer | None = None
 
         app = web.Application()
@@ -81,6 +82,8 @@ class FakeEngine:
         app.router.add_get("/api/v1/stories/{id}/picture.jpg", self._picture)
         app.router.add_post("/api/v1/stories/{id}/fine", self._fine)
         app.router.add_post("/api/v1/sensors", self._sensors)
+        app.router.add_route("*", "/echo/{tail:.*}", self._echo)
+        app.router.add_get("/redirect", self._redirect)
         app.router.add_put("/api/v1/mode", self._mode)
         app.router.add_put("/api/v1/alerts", self._alerts)
         self.app = app
@@ -165,6 +168,28 @@ class FakeEngine:
             return self._refuse()
         self.sensor_posts.append(await request.json())
         return web.Response(status=self.sensors_status)
+
+    async def _echo(self, request: web.Request) -> web.Response:
+        """Say what arrived, the way a page of the engine's app would see a request."""
+        seen = {
+            "method": request.method,
+            "path": request.path,
+            "query": request.query_string,
+            "headers": dict(request.headers),
+            "body": (await request.read()).decode(),
+        }
+        self.echoes.append(seen)
+        return web.json_response(
+            seen,
+            headers={
+                "Set-Cookie": "engine=1; Path=/",
+                "X-Engine": "yes",
+                "Keep-Alive": "timeout=5",
+            },
+        )
+
+    async def _redirect(self, request: web.Request) -> web.Response:
+        raise web.HTTPFound("/echo/landed?x=1")
 
     async def _mode(self, request: web.Request) -> web.Response:
         if not self._authorized(request):

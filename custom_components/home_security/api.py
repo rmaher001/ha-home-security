@@ -80,6 +80,10 @@ class EngineClient:
         self._token = token
 
     @property
+    def session(self) -> aiohttp.ClientSession:
+        return self._session
+
+    @property
     def headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self._token}"}
 

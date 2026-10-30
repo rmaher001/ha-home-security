@@ -53,7 +53,7 @@ sound requests to `webhook_url`, signed with `webhook_secret`.
   Auto picked, or the hand-set mode); `null` while Auto hasn't read who is home yet.
 - `home`: the household, by name: home or not.
 - `alerts`: false means cards still arrive, marked `shadow`: they reach the logbook and the
-  dashboard only, with no phone alerts. Safety cards always ring.
+  sidebar app only, with no phone alerts. Safety cards always ring.
 - `health.protect` / `health.home_assistant`: `null` when the engine isn't set up to use it.
 - `health.listener`: `on` or `off`.
 - `health.ai.on`: false when the engine runs without its AI judge (no model set for stories);
@@ -91,6 +91,51 @@ A hand-set mode stays until set back to `auto`.
 
 `PUT /api/v1/alerts` `{"on": false}`; anything but a boolean `400`.
 
+## House facts (integration → engine)
+
+`POST /api/v1/sensors` with the bearer key. The integration tells the engine the state of the
+house's openings, locks, alarms and people.
+
+```json
+{"snapshot": true,
+ "states": [{"entity_id": "binary_sensor.front_door", "state": "off", "domain": "binary_sensor",
+             "device_class": "door", "name": "Front Door",
+             "changed": "2026-10-27T09:14:05.123456+00:00"}]}
+```
+
+- Entities: `binary_sensor` with device class `door`, `window`, `garage_door`, `opening`,
+  `lock`, `smoke`, `carbon_monoxide`, `gas` or `moisture`; every `lock`; every `person`.
+- `snapshot: true` is the whole list: replace everything known with it (an entity missing from
+  it is gone). It is sent when the integration starts, each time its websocket to the engine
+  reconnects, and every 300 seconds. `snapshot: false` carries only what changed, batched
+  within a second; merge it into what is known.
+- `state` is Home Assistant's own (`on`/`off`, `locked`/`unlocked`, `home`/`not_home`, or
+  `unavailable`/`unknown`). `device_class` and `name` are `null` when Home Assistant has none.
+  `changed` is the state's last change, ISO 8601.
+- The engine answers `204`. A failure is logged once on the integration side and the next
+  snapshot sets it right; nothing waits on the engine.
+
+## The app, through Home Assistant
+
+The engine's own page is shown in Home Assistant's sidebar ("Home Security", logged-in users
+only). Home Assistant passes the page through, so it works over Nabu Casa. The engine must
+serve it so that works: every link, fetch and websocket address on the page is **relative**,
+and `Authorization: Bearer <paired key>` counts as signed in. `?story=<id>` opens that story.
+
+- `home_security/app_session` (Home Assistant websocket command, any logged-in user) returns
+  `{"ticket": "<random>", "expires_in": 60}`. The ticket works once.
+- `GET /api/home_security/app/_session?ticket=<t>&next=<relative path>` burns the ticket and
+  sets an `HttpOnly`, `SameSite=Strict` cookie scoped to `/api/home_security/app/` (kept in
+  memory, ended by 12 idle hours, by unloading the integration, or by pairing again), then
+  redirects to `/api/home_security/app/<next>`.
+- `/api/home_security/app/<path>` needs that cookie. Any method, with the query string, goes
+  to `<engine>/<path>`; `api/v1/ws` goes through as a websocket. Home Assistant adds the key
+  to the request. It never forwards the browser's cookies or `Authorization` header, drops
+  hop-by-hop headers and the engine's `Set-Cookie` from the answer, and rewrites a redirect's
+  absolute `Location` to stay under the app path. A request that changes something (not
+  `GET`, `HEAD` or `OPTIONS`) must carry an `Origin` header naming the same host.
+- The key never appears in a URL, in a response or in the browser.
+
 ## Cards (engine → integration webhook)
 
 The engine POSTs each message to the paired `webhook_url` with headers
@@ -110,7 +155,7 @@ replaces the earlier one on the phone.
  "reply": "...", "shadow": false}
 ```
 
-- `shadow: true` (alerts are off): logbook and dashboard only, no phone alert; the integration
+- `shadow: true` (alerts are off): logbook and app only, no phone alert; the integration
   takes the story's earlier phone alert away, so none is left showing stale news.
 - `alert: false`: update quietly (no sound), never interrupt.
 - `level: "safety"` (smoke, CO, leak) and `level: "high"` with `alert: true`: urgent.

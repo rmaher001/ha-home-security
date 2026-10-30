@@ -19,11 +19,17 @@ for your dashboards, and alerts on your phones.
 - **Phone alerts** through the Home Assistant app, iOS and Android. Each story is one
   notification that updates as the story changes, with its picture and a **That's fine**
   button. Urgent stories ring as critical alerts; quiet ones arrive without a sound.
+- **The Home Security panel** in Home Assistant's sidebar: the engine's own page (daily use and
+  setup), passed through Home Assistant so it works anywhere you reach Home Assistant, even over
+  Nabu Casa. It needs your Home Assistant login; the engine's key stays inside Home Assistant.
+- **House facts for the engine**: doors, windows, garage doors, locks, smoke, CO, gas and leak
+  sensors, and who is home, are sent to the engine on start, after every reconnect, every five
+  minutes and whenever one changes.
 - **The `home_security.mark_fine` action**, for automations and scripts.
 - **The integration's cards**, loaded on every dashboard automatically: no manual resources.
 
-The engine's setup (cameras, people, rules) lives on the engine's own page; the device page's
-"Visit" link opens it.
+The engine's setup (cameras, people, rules) lives on its own page, which the sidebar panel
+shows.
 
 ## Install
 
@@ -58,7 +64,8 @@ Open **Settings > Devices & services > Home Security > Configure**:
   chosen means no phone alerts.
 
 Tapping an alert opens the Home Security panel in the sidebar at that story
-(`/home-security?story=<id>`).
+(`/home-security?story=<id>`). Older installs that set a dashboard here: that option is gone and
+is dropped the next time you save.
 
 ## Development
 

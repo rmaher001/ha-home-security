@@ -28,7 +28,15 @@ ATTR_STORY_ID: Final = "story_id"
 SERVICE_MARK_FINE: Final = "mark_fine"
 
 PICTURE_URL: Final = "/api/home_security/picture/{story_id}"
-PANEL_URL_PATH_PREFIX: Final = "/home-security"
+PANEL_URL_PATH: Final = "home-security"
+PANEL_URL_PATH_PREFIX: Final = f"/{PANEL_URL_PATH}"
+PANEL_NAME: Final = "home-security-panel"
+PANEL_MODULE_KEY: Final = f"{DOMAIN}_panel_module"
+PANEL_FILE: Final = "home-security-panel.js"
+APP_BASE: Final = "/api/home_security/app/"
+APP_COOKIE: Final = "home_security_app"
+APP_TICKET_SECONDS: Final = 60
+APP_SESSION_IDLE_SECONDS: Final = 12 * 3600
 FRONTEND_URL_BASE: Final = "/home_security_frontend"
 CARDS_FILE: Final = "home-security-cards.js"
 
