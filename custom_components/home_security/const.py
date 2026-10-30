@@ -37,3 +37,21 @@ NOTIFY_TAG_PREFIX: Final = "hs-"
 NOTIFY_GROUP: Final = "home-security"
 
 SIGNAL_UPDATE: Final = f"{DOMAIN}_update"
+
+# Job 2: the house facts pushed to the engine.
+SENSOR_DEVICE_CLASSES: Final = frozenset(
+    {
+        "door",
+        "window",
+        "garage_door",
+        "opening",
+        "lock",
+        "smoke",
+        "carbon_monoxide",
+        "gas",
+        "moisture",
+    }
+)
+SENSOR_DOMAINS: Final = frozenset({"binary_sensor", "lock", "person"})
+SENSOR_SNAPSHOT_SECONDS: Final = 300
+SENSOR_BATCH_SECONDS: Final = 1

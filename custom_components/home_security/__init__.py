@@ -30,6 +30,7 @@ from .const import (
 )
 from .coordinator import HomeSecurityCoordinator, async_get_coordinator
 from .frontend import async_register_cards
+from .sensors import async_setup_sensors
 from .views import PictureView
 from .websocket import async_register_commands
 
@@ -98,6 +99,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HomeSecurityConfigEntry)
     entry.runtime_data = HomeSecurityData(client, coordinator)
     entry.async_on_unload(coordinator.async_stop)
     async_setup_alerts(hass, entry)
+    async_setup_sensors(hass, entry)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 

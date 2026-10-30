@@ -69,6 +69,8 @@ class FakeEngine:
         self.sockets: list[web.WebSocketResponse] = []
         self.ws_connects = 0
         self.ws_refuse_auth = False
+        self.sensor_posts: list[dict[str, Any]] = []
+        self.sensors_status = 204
         self.server: TestServer | None = None
 
         app = web.Application()
@@ -78,6 +80,7 @@ class FakeEngine:
         app.router.add_get("/api/v1/stories", self._stories)
         app.router.add_get("/api/v1/stories/{id}/picture.jpg", self._picture)
         app.router.add_post("/api/v1/stories/{id}/fine", self._fine)
+        app.router.add_post("/api/v1/sensors", self._sensors)
         app.router.add_put("/api/v1/mode", self._mode)
         app.router.add_put("/api/v1/alerts", self._alerts)
         self.app = app
@@ -156,6 +159,12 @@ class FakeEngine:
         if story_id != STORY["id"]:
             return web.json_response({"error": "not found"}, status=404)
         return web.json_response({"result": "ok"})
+
+    async def _sensors(self, request: web.Request) -> web.Response:
+        if not self._authorized(request):
+            return self._refuse()
+        self.sensor_posts.append(await request.json())
+        return web.Response(status=self.sensors_status)
 
     async def _mode(self, request: web.Request) -> web.Response:
         if not self._authorized(request):

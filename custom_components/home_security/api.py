@@ -108,6 +108,19 @@ class EngineClient:
     async def async_mark_fine(self, story_id: str) -> None:
         await self._request("POST", f"/api/v1/stories/{story_id}/fine")
 
+    async def async_post_sensors(self, *, snapshot: bool, states: list[dict[str, Any]]) -> None:
+        """Tell the engine about the house's doors, locks and people (it answers 204)."""
+        try:
+            async with self._session.post(
+                f"{self.url}/api/v1/sensors",
+                json={"snapshot": snapshot, "states": states},
+                headers=self.headers,
+                timeout=TIMEOUT,
+            ) as resp:
+                _raise_for_status(resp.status)
+        except (aiohttp.ClientError, TimeoutError) as err:
+            raise EngineConnectionError(str(err)) from err
+
     @asynccontextmanager
     async def async_picture(self, story_id: str) -> AsyncIterator[aiohttp.ClientResponse]:
         """Open the story's picture; the caller reads the body inside the block."""
