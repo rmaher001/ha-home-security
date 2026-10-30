@@ -14,13 +14,14 @@ class HomeSecurityPanel extends HTMLElement {
     this._root = this.attachShadow({ mode: "open" });
     const style = document.createElement("style");
     style.textContent = `
-      :host { display: flex; flex-direction: column; height: 100%; background: var(--primary-background-color, #fafafa);
+      /* Home Assistant gives a panel no fixed height, so the panel takes the screen's own. */
+      :host { display: flex; flex-direction: column; height: 100dvh; background: var(--primary-background-color, #fafafa);
         color: var(--primary-text-color, #212121); font-family: var(--paper-font-body1_-_font-family, Roboto, sans-serif); }
       .bar { display: flex; align-items: center; gap: 8px; height: 56px; padding: 0 12px; flex-shrink: 0;
         background: var(--app-header-background-color, var(--primary-color, #03a9f4));
         color: var(--app-header-text-color, #fff); font-size: 20px; }
       .bar[hidden] { display: none; }
-      iframe { flex: 1; width: 100%; border: 0; background: var(--primary-background-color, #fff); }
+      iframe { flex: 1; min-height: 0; width: 100%; border: 0; background: var(--primary-background-color, #fff); }
       .message { padding: 24px 16px; }
     `;
     this._bar = document.createElement("div");
@@ -28,7 +29,7 @@ class HomeSecurityPanel extends HTMLElement {
     this._menu = document.createElement("ha-menu-button");
     this._bar.append(this._menu, "Home Security");
     this._body = document.createElement("div");
-    this._body.style.cssText = "flex: 1; display: flex; min-height: 0;";
+    this._body.style.cssText = "flex: 1; display: flex; flex-direction: column; min-height: 0;";
     this._root.append(style, this._bar, this._body);
     this._renderBar();
   }

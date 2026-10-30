@@ -93,3 +93,13 @@ test("the menu button shows only on a narrow screen", () => {
   panel.narrow = true;
   assert.equal(panel._bar.hidden, false);
 });
+
+test("the app fills the panel's height, not an iframe's default 150 pixels", () => {
+  const panel = mount("", hassWith(["t-one"]));
+  const css = panel.shadowRoot.querySelector("style").textContent;
+  // A row flexbox stretches the frame only across, so its height must come from a column
+  // that itself fills the screen.
+  assert.match(panel._body.style.cssText, /flex-direction: column/);
+  assert.match(css, /:host \{[^}]*height: 100dvh/);
+  assert.match(css, /iframe \{[^}]*min-height: 0/);
+});
