@@ -12,12 +12,15 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import re
 import secrets
 import time
-from collections.abc import Callable
+from collections import OrderedDict, deque
+from collections.abc import AsyncIterator, Callable, Iterator
+from dataclasses import dataclass
 from http import HTTPStatus
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 import aiohttp
 from aiohttp import web
@@ -29,6 +32,8 @@ from .const import (
     APP_BASE,
     APP_COOKIE,
     APP_SESSION_IDLE_SECONDS,
+    APP_SESSION_MAX_SECONDS,
+    APP_TICKET_RATE,
     APP_TICKET_SECONDS,
     DOMAIN,
 )
@@ -38,6 +43,7 @@ _LOGGER = logging.getLogger(__name__)
 
 CHUNK = 64 * 1024
 MAX_OUTSTANDING = 200  # tickets or sessions held at once; the oldest go first
+MAX_BODY = 1024 * 1024  # the most a browser may send through
 UPSTREAM_TIMEOUT = aiohttp.ClientTimeout(total=None, sock_connect=15, sock_read=120)
 SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
@@ -71,72 +77,182 @@ DROP_RESPONSE_HEADERS = frozenset(
 APP_KEY = f"{DOMAIN}_app_access"
 
 
+@dataclass
+class Session:
+    """Who the cookie belongs to: the Home Assistant user and the login they came in with."""
+
+    user_id: str
+    refresh_token_id: str | None
+    created: float
+    last: float
+
+
 class AppAccess:
     """One-time tickets and path-scoped sessions, kept in memory only."""
 
-    def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
+    def __init__(self, hass: HomeAssistant, clock: Callable[[], float] = time.monotonic) -> None:
+        self.hass = hass
         self.clock = clock
-        self._tickets: dict[str, float] = {}  # ticket -> expires
-        self._sessions: dict[str, float] = {}  # session id -> last used
+        # Oldest first: tickets by expiry, sessions by last use (use moves one to the end).
+        self._tickets: OrderedDict[str, tuple[float, str, str | None]] = OrderedDict()
+        self._sessions: OrderedDict[str, Session] = OrderedDict()
+        self._asks: dict[int, deque[float]] = {}  # by id of the websocket connection
+        self._live: set[Callable[[], None]] = set()
 
-    def new_ticket(self) -> str:
+    def allow_ticket(self, connection: Any) -> bool:
+        """At most APP_TICKET_RATE tickets a minute per websocket connection."""
+        now = self.clock()
+        for key in [k for k, a in self._asks.items() if not a or now - a[-1] > 60]:
+            del self._asks[key]  # connections that have gone quiet are forgotten
+        asks = self._asks.setdefault(id(connection), deque())
+        while asks and now - asks[0] > 60:
+            asks.popleft()
+        if len(asks) >= APP_TICKET_RATE:
+            return False
+        asks.append(now)
+        return True
+
+    def new_ticket(self, user_id: str, refresh_token_id: str | None) -> str:
         now = self.clock()
         self._prune(now)
         ticket = secrets.token_urlsafe(32)
-        self._tickets[ticket] = now + APP_TICKET_SECONDS
+        self._tickets[ticket] = (now + APP_TICKET_SECONDS, user_id, refresh_token_id)
         return ticket
 
     def redeem(self, ticket: str | None) -> str | None:
-        """Burn the ticket; a live one gives a new session id."""
+        """Burn the ticket; a live one gives a new session id for the same user and login."""
         now = self.clock()
-        expires = self._tickets.pop(ticket, None) if ticket else None
-        if expires is None or expires < now:
+        held = self._tickets.pop(ticket, None) if ticket else None
+        if held is None or held[0] < now:
             return None
         self._prune(now)
         session = secrets.token_urlsafe(32)
-        self._sessions[session] = now
+        self._sessions[session] = Session(held[1], held[2], now, now)
         return session
 
-    def valid(self, session: str | None) -> bool:
-        """True while the session was used in the last twelve hours; using it renews it."""
+    async def valid(self, session_id: str | None) -> Session | None:
+        """The session, if it is still good; using it renews its idle time.
+
+        Good means: used within 12 hours, younger than 24, and the person still exists, is
+        active, and the login they came in with hasn't been revoked.
+        """
         now = self.clock()
-        last = self._sessions.get(session) if session else None
-        if last is None:
-            return False
-        if now - last > APP_SESSION_IDLE_SECONDS:
-            del self._sessions[session]
-            return False
-        self._sessions[session] = now
-        return True
+        session = self._sessions.get(session_id) if session_id else None
+        if session is None:
+            return None
+        if now - session.last > APP_SESSION_IDLE_SECONDS or (
+            now - session.created > APP_SESSION_MAX_SECONDS
+        ):
+            del self._sessions[session_id]
+            return None
+        user = await self.hass.auth.async_get_user(session.user_id)
+        revoked = session.refresh_token_id is not None and (
+            self.hass.auth.async_get_refresh_token(session.refresh_token_id) is None
+        )
+        if user is None or not user.is_active or revoked:
+            self._sessions.pop(session_id, None)
+            return None
+        if session_id in self._sessions:
+            session.last = now
+            self._sessions.move_to_end(session_id)
+        return session
+
+    @contextlib.contextmanager
+    def track(self, close: Callable[[], None]) -> Iterator[None]:
+        """Note a relay or a streaming answer, so ending the sessions can cut it off."""
+        self._live.add(close)
+        try:
+            yield
+        finally:
+            self._live.discard(close)
 
     def clear(self) -> None:
+        """End every session and ticket, and cut every live connection."""
         self._tickets.clear()
         self._sessions.clear()
+        for close in list(self._live):
+            with contextlib.suppress(Exception):
+                close()
 
     def _prune(self, now: float) -> None:
-        for ticket in [t for t, expires in self._tickets.items() if expires < now]:
-            del self._tickets[ticket]
-        for session in [
-            s for s, last in self._sessions.items() if now - last > APP_SESSION_IDLE_SECONDS
-        ]:
-            del self._sessions[session]
+        while self._tickets and next(iter(self._tickets.values()))[0] < now:
+            self._tickets.popitem(last=False)
+        while self._sessions and (
+            now - next(iter(self._sessions.values())).last > APP_SESSION_IDLE_SECONDS
+        ):
+            self._sessions.popitem(last=False)
         for held in (self._tickets, self._sessions):
             while len(held) >= MAX_OUTSTANDING:
-                del held[next(iter(held))]
+                held.popitem(last=False)
 
 
 def async_get_app_access(hass: HomeAssistant) -> AppAccess:
-    return hass.data.setdefault(APP_KEY, AppAccess())
+    if (access := hass.data.get(APP_KEY)) is None:
+        access = hass.data[APP_KEY] = AppAccess(hass)
+    return access
+
+
+# What the engine's app may do through here, and nothing else. Matched on the decoded path,
+# case-sensitively and exactly (no trailing-slash variants).
+_ID = r"[A-Za-z0-9_-]{1,64}"
+_ROUTES: tuple[tuple[str, re.Pattern[str], str], ...] = tuple(
+    (method, re.compile(pattern), kind)
+    for method, pattern, kind in (
+        ("GET", r"", "open"),
+        ("GET", r"page/home-security-cards-[^/]+\.js", "open"),
+        ("GET", r"api/v1/state", "open"),
+        ("GET", r"api/v1/stories", "open"),
+        ("GET", rf"api/v1/stories/{_ID}/picture\.jpg", "open"),
+        ("POST", rf"api/v1/stories/{_ID}/fine", "open"),
+        ("PUT", r"api/v1/mode", "open"),
+        ("PUT", r"api/v1/alerts", "open"),
+        ("GET", r"api/v1/ws", "open"),
+        # These change the engine's settings: administrators only.
+        ("GET", r"page/setup", "admin"),
+        ("POST", r"page/setup", "admin"),
+        ("POST", r"page/restore", "admin"),
+        ("POST", r"page/pair", "admin"),
+    )
+)
+# Encoded dots, slashes and backslashes (also encoded twice), and NUL: never in a path here.
+_BAD_ENCODING = re.compile(r"%(2e|2f|5c|25|00)", re.IGNORECASE)
+
+
+def _route_for(method: str, rest: str) -> str | None:
+    """ "open", "admin" or None (blocked) for a request; rest is the raw path after the app base."""
+    if _BAD_ENCODING.search(rest) or "\\" in rest or "//" in rest:
+        return None
+    if any(segment in (".", "..") for segment in rest.split("/")):
+        return None
+    path = unquote(rest)
+    if any(ord(c) < 0x20 or ord(c) == 0x7F for c in path):
+        return None
+    for allowed, pattern, kind in _ROUTES:
+        if allowed == method and pattern.fullmatch(path):
+            return kind
+    return None
 
 
 def _safe_next(value: str) -> bool:
-    """Only a path inside the app: no scheme, no host, no backslash, no climbing out."""
-    if any(ord(c) < 0x20 or ord(c) == 0x7F for c in value):
-        return False
+    """Only a path inside the app: no scheme, no host, no backslash, no climbing out.
+
+    The path part is checked again after one more decoding, so %2e%2e or %2f can't sneak by.
+    """
     path = value.split("?", 1)[0]
-    return not (
-        "\\" in value or "://" in value or value.startswith("//") or ".." in path.split("/")
-    )
+    if _BAD_ENCODING.search(path):
+        return False
+    for text in (value, unquote(value)):
+        if any(ord(c) < 0x20 or ord(c) == 0x7F for c in text):
+            return False
+        before_query = text.split("?", 1)[0]
+        if (
+            "\\" in text
+            or "://" in text
+            or text.startswith("//")
+            or ".." in before_query.split("/")
+        ):
+            return False
+    return True
 
 
 def _same_origin(request: web.Request) -> bool:
@@ -204,11 +320,25 @@ class AppProxyView(HomeAssistantView):
 
     async def handle(self, request: web.Request, path: str) -> web.StreamResponse:
         hass = request.app[KEY_HASS]
-        if not async_get_app_access(hass).valid(request.cookies.get(APP_COOKIE)):
+        access = async_get_app_access(hass)
+        session = await access.valid(request.cookies.get(APP_COOKIE))
+        if session is None:
             return web.Response(
                 status=HTTPStatus.FORBIDDEN,
                 text="Your Home Security session has ended. Reload the page.",
             )
+
+        # The raw (still encoded) path and query, exactly as the browser sent them.
+        rest = request.rel_url.raw_path[len(APP_BASE) :]
+        kind = _route_for(request.method, rest)
+        if kind is None:
+            return web.Response(status=HTTPStatus.NOT_FOUND)
+        if kind == "admin":
+            user = await hass.auth.async_get_user(session.user_id)
+            if user is None or not user.is_admin:
+                return web.Response(
+                    status=HTTPStatus.FORBIDDEN, text="Only an administrator can do that."
+                )
         if (coordinator := async_get_coordinator(hass)) is None:
             return web.Response(status=HTTPStatus.SERVICE_UNAVAILABLE)
         client = coordinator.client
@@ -218,9 +348,9 @@ class AppProxyView(HomeAssistantView):
             return web.Response(status=HTTPStatus.FORBIDDEN, text="Cross-site request refused.")
         if is_socket and "Origin" in request.headers and not _same_origin(request):
             return web.Response(status=HTTPStatus.FORBIDDEN, text="Cross-site request refused.")
+        if (request.content_length or 0) > MAX_BODY:
+            return web.Response(status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
 
-        # The raw (still encoded) path and query, exactly as the browser sent them.
-        rest = request.rel_url.raw_path[len(APP_BASE) :]
         target = f"{client.url}/{rest}"
         if request.rel_url.raw_query_string:
             target += f"?{request.rel_url.raw_query_string}"
@@ -228,23 +358,38 @@ class AppProxyView(HomeAssistantView):
         headers = {
             name: value for name in FORWARD_REQUEST_HEADERS if (value := request.headers.get(name))
         }
+        if request.content_length is not None:
+            headers["Content-Length"] = str(request.content_length)
         headers.update(client.headers)  # the paired key, added here
 
         if is_socket:
-            return await self._socket(request, client, upstream_url, headers)
-        return await self._plain(request, client, upstream_url, headers)
+            return await self._socket(request, access, client, upstream_url, headers)
+        return await self._plain(request, access, client, upstream_url, headers)
 
     get = post = put = patch = delete = head = handle
 
     async def _plain(
         self,
         request: web.Request,
+        access: AppAccess,
         client: Any,
         upstream_url: URL,
         headers: dict[str, str],
     ) -> web.StreamResponse:
         session: aiohttp.ClientSession = client.session
-        data = request.content if request.can_read_body else None
+        too_large = False
+
+        async def limited() -> AsyncIterator[bytes]:
+            nonlocal too_large
+            total = 0
+            async for chunk in request.content.iter_chunked(CHUNK):
+                total += len(chunk)
+                if total > MAX_BODY:
+                    too_large = True
+                    raise _TooLarge
+                yield chunk
+
+        data = limited() if request.can_read_body else None
         response: web.StreamResponse | None = None
         try:
             async with session.request(
@@ -265,11 +410,15 @@ class AppProxyView(HomeAssistantView):
                     out_headers["Location"] = _rewrite_location(location, client.url)
                 response = web.StreamResponse(status=upstream.status, headers=out_headers)
                 await response.prepare(request)
-                if request.method != "HEAD":
-                    async for chunk in upstream.content.iter_chunked(CHUNK):
-                        await response.write(chunk)
-                await response.write_eof()
-        except (aiohttp.ClientError, TimeoutError) as err:
+                transport = request.transport
+                with access.track(lambda: transport and transport.close()):
+                    if request.method != "HEAD":
+                        async for chunk in upstream.content.iter_chunked(CHUNK):
+                            await response.write(chunk)
+                    await response.write_eof()
+        except (aiohttp.ClientError, TimeoutError, _TooLarge) as err:
+            if too_large:
+                return web.Response(status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
             if response is not None and response.prepared:
                 _LOGGER.debug("The engine broke off a response: %s", err)
                 return response
@@ -279,10 +428,12 @@ class AppProxyView(HomeAssistantView):
     async def _socket(
         self,
         request: web.Request,
+        access: AppAccess,
         client: Any,
         upstream_url: URL,
         headers: dict[str, str],
     ) -> web.StreamResponse:
+        hass = request.app[KEY_HASS]
         session: aiohttp.ClientSession = client.session
         headers = {k: v for k, v in headers.items() if k == "Authorization"}
         try:
@@ -309,7 +460,8 @@ class AppProxyView(HomeAssistantView):
             asyncio.ensure_future(pump(downstream, upstream)),
         ]
         try:
-            await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            with access.track(lambda: hass.async_create_task(downstream.close())):
+                await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         finally:
             for task in tasks:
                 task.cancel()
@@ -321,10 +473,26 @@ class AppProxyView(HomeAssistantView):
         return downstream
 
 
+class _TooLarge(Exception):
+    """The browser sent more than MAX_BODY."""
+
+
 def _rewrite_location(location: str, engine_url: str) -> str:
-    """Keep a redirect inside the app: the engine's own paths live under the app path."""
-    if location.startswith(engine_url):
-        location = location[len(engine_url) :] or "/"
+    """Keep a redirect inside the app: the engine's own paths live under the app path.
+
+    Compares the parsed scheme and host, never a string prefix, so an address that merely
+    starts like the engine's isn't taken for it.
+    """
+    parts = urlsplit(location)
+    if parts.scheme or parts.netloc:
+        engine = urlsplit(engine_url)
+        if (parts.scheme.lower(), parts.netloc.lower()) != (
+            engine.scheme.lower(),
+            engine.netloc.lower(),
+        ):
+            return location
+        tail = parts._replace(scheme="", netloc="").geturl()
+        return f"{APP_BASE}{tail.lstrip('/')}"
     if location.startswith("/") and not location.startswith("//"):
         return f"{APP_BASE}{location[1:]}"
     return location

@@ -162,5 +162,9 @@ def ws_app_session(
     """A one-time ticket the panel trades for the app's session cookie (any logged-in user)."""
     if not _coordinator(hass, connection, msg):
         return
-    ticket = async_get_app_access(hass).new_ticket()
+    access = async_get_app_access(hass)
+    if not access.allow_ticket(connection):
+        connection.send_error(msg["id"], "rate_limited", "Too many tries; wait a minute")
+        return
+    ticket = access.new_ticket(connection.user.id, connection.refresh_token_id)
     connection.send_result(msg["id"], {"ticket": ticket, "expires_in": APP_TICKET_SECONDS})

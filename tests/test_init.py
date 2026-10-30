@@ -49,7 +49,7 @@ async def test_device(
     assert device.name == "Home Security"
     assert device.manufacturer == "Home Security"
     assert device.sw_version == "0.1.0"
-    assert device.configuration_url == config_entry.data[CONF_URL]
+    assert device.configuration_url == "homeassistant://home-security"
 
     state = copy.deepcopy(engine.state)
     state["version"] = "0.2.0"

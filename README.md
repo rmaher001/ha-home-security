@@ -21,7 +21,8 @@ for your dashboards, and alerts on your phones.
   button. Urgent stories ring as critical alerts; quiet ones arrive without a sound.
 - **The Home Security panel** in Home Assistant's sidebar: the engine's own page (daily use and
   setup), passed through Home Assistant so it works anywhere you reach Home Assistant, even over
-  Nabu Casa. It needs your Home Assistant login; the engine's key stays inside Home Assistant.
+  Nabu Casa. It needs your Home Assistant login (changing the engine's settings needs an administrator);
+  the engine's key stays inside Home Assistant.
 - **House facts for the engine**: doors, windows, garage doors, locks, smoke, CO, gas and leak
   sensors, and who is home, are sent to the engine on start, after every reconnect, every five
   minutes and whenever one changes.

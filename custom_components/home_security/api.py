@@ -24,6 +24,10 @@ class EngineAuthError(EngineError):
     """The engine refused the token (401)."""
 
 
+class EngineWantsSnapshot(EngineError):
+    """The engine took no change (409): it wants the whole picture first."""
+
+
 class EngineCodeRefused(EngineError):
     """The pairing code was wrong, spent or expired (403)."""
 
@@ -121,6 +125,8 @@ class EngineClient:
                 headers=self.headers,
                 timeout=TIMEOUT,
             ) as resp:
+                if resp.status == 409:
+                    raise EngineWantsSnapshot("the engine wants a full snapshot")
                 _raise_for_status(resp.status)
         except (aiohttp.ClientError, TimeoutError) as err:
             raise EngineConnectionError(str(err)) from err

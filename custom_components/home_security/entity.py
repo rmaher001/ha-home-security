@@ -10,7 +10,7 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity import Entity
 
 from .api import EngineError
-from .const import DOMAIN, NAME
+from .const import DOMAIN, NAME, PANEL_URL_PATH
 from .coordinator import HomeSecurityCoordinator
 
 
@@ -30,7 +30,7 @@ class HomeSecurityEntity(Entity):
             name=NAME,
             manufacturer=NAME,
             sw_version=(coordinator.state or {}).get("version"),
-            configuration_url=coordinator.client.url,
+            configuration_url=f"homeassistant://{PANEL_URL_PATH}",
         )
 
     @property

@@ -74,7 +74,30 @@ class FakeEngine:
         self.echoes: list[dict[str, Any]] = []
         self.server: TestServer | None = None
 
-        app = web.Application()
+        self.redirect_root = False
+        self.want_snapshot = False
+
+        @web.middleware
+        async def record(request: web.Request, handler):
+            """Note what reached the engine, and give every answer headers a proxy must drop."""
+            if request.path != "/api/v1/ws":
+                self.echoes.append(
+                    {
+                        "method": request.method,
+                        "path": request.path,
+                        "query": request.query_string,
+                        "headers": dict(request.headers),
+                        "body": (await request.read()).decode(errors="replace"),
+                    }
+                )
+            resp = await handler(request)
+            if request.path != "/api/v1/ws" and not resp.prepared:
+                resp.headers.add("Set-Cookie", "engine=1; Path=/")
+                resp.headers["X-Engine"] = "yes"
+                resp.headers["Keep-Alive"] = "timeout=5"
+            return resp
+
+        app = web.Application(middlewares=[record], client_max_size=64 * 1024 * 1024)
         app.router.add_post("/api/v1/pair", self._pair)
         app.router.add_get("/api/v1/state", self._state)
         app.router.add_get("/api/v1/ws", self._ws)
@@ -82,8 +105,9 @@ class FakeEngine:
         app.router.add_get("/api/v1/stories/{id}/picture.jpg", self._picture)
         app.router.add_post("/api/v1/stories/{id}/fine", self._fine)
         app.router.add_post("/api/v1/sensors", self._sensors)
-        app.router.add_route("*", "/echo/{tail:.*}", self._echo)
-        app.router.add_get("/redirect", self._redirect)
+        app.router.add_get("/", self._root)
+        app.router.add_get("/page/home-security-cards-slow.js", self._slow)
+        app.router.add_route("*", "/page/{tail:.*}", self._page)
         app.router.add_put("/api/v1/mode", self._mode)
         app.router.add_put("/api/v1/alerts", self._alerts)
         self.app = app
@@ -166,30 +190,29 @@ class FakeEngine:
     async def _sensors(self, request: web.Request) -> web.Response:
         if not self._authorized(request):
             return self._refuse()
-        self.sensor_posts.append(await request.json())
+        body = await request.json()
+        self.sensor_posts.append(body)
+        if self.want_snapshot and not body["snapshot"]:
+            return web.json_response({"want_snapshot": True}, status=409)
+        if body["snapshot"]:
+            self.want_snapshot = False
         return web.Response(status=self.sensors_status)
 
-    async def _echo(self, request: web.Request) -> web.Response:
-        """Say what arrived, the way a page of the engine's app would see a request."""
-        seen = {
-            "method": request.method,
-            "path": request.path,
-            "query": request.query_string,
-            "headers": dict(request.headers),
-            "body": (await request.read()).decode(),
-        }
-        self.echoes.append(seen)
-        return web.json_response(
-            seen,
-            headers={
-                "Set-Cookie": "engine=1; Path=/",
-                "X-Engine": "yes",
-                "Keep-Alive": "timeout=5",
-            },
-        )
+    async def _root(self, request: web.Request) -> web.Response:
+        if self.redirect_root:
+            raise web.HTTPFound("/page/setup")
+        return web.Response(text="<html>app</html>", content_type="text/html")
 
-    async def _redirect(self, request: web.Request) -> web.Response:
-        raise web.HTTPFound("/echo/landed?x=1")
+    async def _page(self, request: web.Request) -> web.Response:
+        return web.json_response({"page": request.match_info["tail"]})
+
+    async def _slow(self, request: web.Request) -> web.StreamResponse:
+        """A response that never ends: one chunk, then silence."""
+        resp = web.StreamResponse()
+        await resp.prepare(request)
+        await resp.write(b"first")
+        await asyncio.sleep(60)
+        return resp
 
     async def _mode(self, request: web.Request) -> web.Response:
         if not self._authorized(request):

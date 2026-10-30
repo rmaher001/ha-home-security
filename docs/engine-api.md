@@ -112,8 +112,12 @@ house's openings, locks, alarms and people.
 - `state` is Home Assistant's own (`on`/`off`, `locked`/`unlocked`, `home`/`not_home`, or
   `unavailable`/`unknown`). `device_class` and `name` are `null` when Home Assistant has none.
   `changed` is the state's last change, ISO 8601.
-- The engine answers `204`. A failure is logged once on the integration side and the next
-  snapshot sets it right; nothing waits on the engine.
+- The engine answers `204`. Answers other than 204: `400` a bad body, `401` no key, and `409
+  {"want_snapshot": true}` to a change push when the engine has had no push since it restarted
+  and has nothing to merge changes into. On `409` the integration sends a snapshot at once.
+- A failed push is logged once on the integration side, and a snapshot follows about 10
+  seconds later, so a change is never lost for the five minutes until the next one. Nothing
+  waits on the engine. Bodies up to 4 MB are accepted.
 
 ## The app, through Home Assistant
 
@@ -128,12 +132,26 @@ and `Authorization: Bearer <paired key>` counts as signed in. `?story=<id>` open
   sets an `HttpOnly`, `SameSite=Strict` cookie scoped to `/api/home_security/app/` (kept in
   memory, ended by 12 idle hours, by unloading the integration, or by pairing again), then
   redirects to `/api/home_security/app/<next>`.
-- `/api/home_security/app/<path>` needs that cookie. Any method, with the query string, goes
-  to `<engine>/<path>`; `api/v1/ws` goes through as a websocket. Home Assistant adds the key
+- `/api/home_security/app/<path>` needs that cookie, and only these routes pass (matched on the
+  exact, decoded path, case-sensitively; encoded or doubled dots, slashes and backslashes,
+  `//` and trailing-slash variants are refused; everything else is `404`):
+  - anyone signed in: `GET` the root; `GET page/home-security-cards-<anything>.js`; `GET
+    api/v1/state`, `api/v1/stories`, `api/v1/stories/<id>/picture.jpg`; `POST
+    api/v1/stories/<id>/fine`; `PUT api/v1/mode`, `api/v1/alerts`; `GET api/v1/ws` as a
+    websocket.
+  - administrators only (`403` for anyone else): `GET`/`POST page/setup`, `POST page/restore`,
+    `POST page/pair`.
+  - never: `api/v1/pair`, `api/v1/sensors`, the password and sign-in pages, and the rest.
+- Allowed requests go to `<engine>/<path>`, with the query string. Home Assistant adds the key
   to the request. It never forwards the browser's cookies or `Authorization` header, drops
-  hop-by-hop headers and the engine's `Set-Cookie` from the answer, and rewrites a redirect's
-  absolute `Location` to stay under the app path. A request that changes something (not
-  `GET`, `HEAD` or `OPTIONS`) must carry an `Origin` header naming the same host.
+  hop-by-hop headers and the engine's `Set-Cookie` from the answer, and rewrites a redirect to
+  the engine's own address to stay under the app path. A request that changes something (not
+  `GET`, `HEAD` or `OPTIONS`) must carry an `Origin` header naming the same host. A request
+  body is limited to 1 MB (`413`).
+- A session belongs to the Home Assistant user and login that asked for the ticket. It ends
+  when that user is removed or deactivated or that login is revoked, after 12 idle hours, after
+  24 hours in all, when the integration unloads or pairs again. Ending a session cuts its open
+  websocket and streaming connections. Tickets are limited to 10 a minute per connection.
 - The key never appears in a URL, in a response or in the browser.
 
 ## Cards (engine → integration webhook)

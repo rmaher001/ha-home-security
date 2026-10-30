@@ -1,7 +1,8 @@
 """Job 2: tells the engine about the house's doors, windows, locks, alarms and people.
 
 A full snapshot goes out on setup, on every engine reconnect and every five minutes; changes
-follow within a second, batched. A failed push is logged once and the next snapshot retries it.
+follow within a second, batched. A failed push is logged once, and a snapshot follows ten
+seconds later; the engine can also ask for one at once (409).
 Nothing here waits on the engine: sends run as background tasks.
 """
 
@@ -16,11 +17,12 @@ from homeassistant.const import EVENT_STATE_CHANGED
 from homeassistant.core import CALLBACK_TYPE, Event, HomeAssistant, State, callback
 from homeassistant.helpers.event import async_call_later, async_track_time_interval
 
-from .api import EngineError
+from .api import EngineError, EngineWantsSnapshot
 from .const import (
     SENSOR_BATCH_SECONDS,
     SENSOR_DEVICE_CLASSES,
     SENSOR_DOMAINS,
+    SENSOR_RETRY_SECONDS,
     SENSOR_SNAPSHOT_SECONDS,
 )
 
@@ -64,6 +66,7 @@ class SensorPusher:
         self.entry = entry
         self._pending: dict[str, State] = {}
         self._timer: CALLBACK_TYPE | None = None
+        self._retry: CALLBACK_TYPE | None = None
         self._unsubs: list[CALLBACK_TYPE] = []
         self._failing = False
         self._lock = asyncio.Lock()
@@ -103,9 +106,10 @@ class SensorPusher:
         for unsub in self._unsubs:
             unsub()
         self._unsubs = []
-        if self._timer:
-            self._timer()
-            self._timer = None
+        for timer in (self._timer, self._retry):
+            if timer:
+                timer()
+        self._timer = self._retry = None
         self._pending.clear()
 
     @callback
@@ -118,9 +122,10 @@ class SensorPusher:
         if self._stopped:
             return
         self._pending.clear()
-        if self._timer:
-            self._timer()
-            self._timer = None
+        for timer in (self._timer, self._retry):
+            if timer:
+                timer()
+        self._timer = self._retry = None
         self.entry.async_create_background_task(
             self.hass, self._async_send(snapshot=True), "home_security sensor snapshot"
         )
@@ -143,6 +148,17 @@ class SensorPusher:
             self.hass, self._async_send(snapshot=False), "home_security sensor changes"
         )
 
+    @callback
+    def _async_retry_soon(self) -> None:
+        """A change that didn't get through is made good by a snapshot a few seconds on."""
+        if self._retry is None and not self._stopped:
+            self._retry = async_call_later(self.hass, SENSOR_RETRY_SECONDS, self._async_retry)
+
+    @callback
+    def _async_retry(self, _now: datetime) -> None:
+        self._retry = None
+        self._async_snapshot()
+
     async def _async_send(self, *, snapshot: bool) -> None:
         if snapshot:
             states = [_payload(s) for s in self.hass.states.async_all() if _wanted(s)]
@@ -153,7 +169,12 @@ class SensorPusher:
         async with self._lock:
             try:
                 await client.async_post_sensors(snapshot=snapshot, states=states)
+            except EngineWantsSnapshot:
+                # The engine restarted and has nothing to merge changes into: tell it all.
+                self._async_snapshot()
             except EngineError as err:
+                if not snapshot:
+                    self._async_retry_soon()
                 if not self._failing:
                     _LOGGER.warning(
                         "Couldn't send the house's sensors to the engine (will retry with "

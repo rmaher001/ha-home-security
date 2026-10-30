@@ -203,3 +203,49 @@ async def test_nothing_is_sent_after_unload(
     async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=400))
     await hass.async_block_till_done()
     assert engine.sensor_posts == []
+
+
+async def test_a_failed_change_push_is_followed_by_a_snapshot_soon(
+    hass: HomeAssistant, engine: FakeEngine, config_entry: MockConfigEntry, house: None
+) -> None:
+    """A door opened while the engine was down must not wait five minutes to be known."""
+    await setup_integration(hass, config_entry)
+    await wait_for(lambda: engine.sensor_posts)
+    await hass.async_block_till_done()
+    engine.sensor_posts.clear()
+
+    engine.sensors_status = 500
+    hass.states.async_set("binary_sensor.front_door", "on", {"device_class": "door"})
+    await flush(hass)
+    await wait_for(lambda: engine.sensor_posts)
+    assert engine.sensor_posts[-1]["snapshot"] is False
+
+    engine.sensors_status = 204
+    engine.sensor_posts.clear()
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=15))
+    await hass.async_block_till_done()
+    await wait_for(lambda: engine.sensor_posts)
+    assert engine.sensor_posts[0]["snapshot"] is True
+    assert by_id(engine.sensor_posts[0])["binary_sensor.front_door"]["state"] == "on"
+
+
+async def test_a_409_gets_a_snapshot_at_once(
+    hass: HomeAssistant,
+    engine: FakeEngine,
+    config_entry: MockConfigEntry,
+    house: None,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The engine restarted and wants everything again before it takes changes."""
+    await setup_integration(hass, config_entry)
+    await wait_for(lambda: engine.sensor_posts)
+    await hass.async_block_till_done()
+    engine.sensor_posts.clear()
+
+    engine.want_snapshot = True
+    hass.states.async_set("lock.front", "unlocked")
+    await flush(hass)
+    await wait_for(lambda: any(p["snapshot"] for p in engine.sensor_posts))
+    assert [p["snapshot"] for p in engine.sensor_posts] == [False, True]
+    assert by_id(engine.sensor_posts[1])["lock.front"]["state"] == "unlocked"
+    assert "Couldn't send" not in caplog.text
