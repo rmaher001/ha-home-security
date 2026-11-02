@@ -50,10 +50,14 @@
       "init": {
         "title": "Alerts",
         "data": {
-          "phones": "Phones that get alerts"
+          "phones": "Phones that get alerts",
+          "script": "Send through a script",
+          "script_source": "Source for the script"
         },
         "data_description": {
-          "phones": "Phones with the Home Assistant app. None chosen means no phone alerts."
+          "phones": "Phones with the Home Assistant app. None chosen means no phone alerts.",
+          "script": "Optional. A script that sends notifications for you (for example a notification hub). The guard's alerts go to it instead of straight to the phones; other alerts still go to the phones. If the script is missing or unavailable, the guard's alerts go to the phones. Taking an earlier alert off the phones (when alerts are turned off, or a story joins another) always goes to the phones chosen above, so pick the phones the script delivers to as well. Leave empty to notify the phones directly.",
+          "script_source": "Passed to the script as `source`. Used only when a script is chosen."
         }
       }
     }

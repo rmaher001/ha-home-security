@@ -14,6 +14,9 @@ CONF_TOKEN: Final = "token"
 CONF_WEBHOOK_ID: Final = "webhook_id"
 CONF_WEBHOOK_SECRET: Final = "webhook_secret"
 CONF_PHONES: Final = "phones"
+CONF_SCRIPT: Final = "script"
+CONF_SCRIPT_SOURCE: Final = "script_source"
+DEFAULT_SCRIPT_SOURCE: Final = "security.guard.alert"
 
 PAIR_NAME: Final = "Home Assistant"
 STORY_DAYS: Final = 7

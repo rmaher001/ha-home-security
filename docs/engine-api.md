@@ -136,7 +136,8 @@ and `Authorization: Bearer <paired key>` counts as signed in. `?story=<id>` open
   exact, decoded path, case-sensitively; encoded or doubled dots, slashes and backslashes,
   `//` and trailing-slash variants are refused; everything else is `404`):
   - anyone signed in: `GET` the root; `GET page/home-security-cards-<anything>.js`; `GET
-    api/v1/state`, `api/v1/stories`, `api/v1/stories/<id>/picture.jpg`; `POST
+    api/v1/state`, `api/v1/stories`, `api/v1/stories/<id>/picture.jpg`, `api/v1/stories/<id>/detail`,
+    `api/v1/stories/<id>/pictures/<n>.jpg` (n is one to four digits); `POST
     api/v1/stories/<id>/fine`; `PUT api/v1/mode`, `api/v1/alerts`; `GET api/v1/ws` as a
     websocket.
   - administrators only (`403` for anyone else): `GET`/`POST page/setup`, `POST page/restore`,
@@ -181,6 +182,57 @@ replaces the earlier one on the phone.
 - `level: "safety"` (smoke, CO, leak) and `level: "high"` with `alert: true`: urgent.
 - `snapshot` and `reply` are the engine's own addresses: the integration uses the picture and
   "That's fine" routes above instead.
+
+### Guard cards (`"kind": "guard"`)
+
+A guard card is the perimeter guard's alert: one per alerting session, sent at once, then
+sent again with the same `story` when a description arrives, which replaces it on the phone.
+It carries one more field:
+
+```json
+{"version": 1, "type": "card", "story": "01JB...", "kind": "guard", "level": "watch",
+ "alert": true, "camera_id": "663a1c2d00e1f2a3b4c5d6e7", "title": "Garden: a person at the side gate",
+ "message": "...", "...": "the rest as above"}
+```
+
+- `camera_id`: the UniFi Protect id of the camera where the person was last seen. The
+  integration finds that camera's Home Assistant entity (the device whose link is
+  `<console>/protect/devices/<camera_id>` in the `unifiprotect` integration; its main
+  camera, never the package camera, and only an enabled one: a disabled entity has no state to
+  show) and shows a live view in
+  the expanded notification. If it can't be found, or the lookup fails, the card goes out without one.
+- A guard card is **never critical**, because iOS can't replace a critical notification:
+  `alert: true` is time-sensitive (iOS `interruption-level: time-sensitive`; on Android the
+  `Home security urgent` channel), `alert: false` is passive. This holds for any `level`.
+- **Send through a script** (integration option): when a script entity is set, a guard card
+  is sent through `script.turn_on` of that script, instead of to the phones. The script gets
+  the variables `source` (the option's source string, default `security.guard.alert`),
+  `title`, `message`, `image` (signed picture path), `click_action` (panel link
+  `/home-security?story=<id>`), `tag` (same story, same tag: a later card replaces the
+  earlier one), `actions` (the That's fine action) and `camera` (the camera entity id; absent
+  when unresolved). Every other kind of card goes straight to the phones, as does a guard
+  card when no script is set, and a guard card with `alert: false` (a quiet re-send): the
+  script's source would give it the hub's level and it would buzz as if new, so it goes to the
+  phones as passive.
+  - What the integration detects: before calling, it checks the script entity exists and is not
+    `unavailable` (Home Assistant's own `script.turn_on` only logs for an unknown entity and
+    returns normally, which would lose the alert). If it is missing or unavailable, it logs a
+    warning and sends the guard card straight to the phones, as if no script were set. If the
+    call itself raises, the integration logs a warning and sends the guard card straight to the
+    phones too, so a guard alert is never lost to its hub failing.
+  - What it cannot detect: `script.turn_on` does not wait for the script to finish. A failure
+    inside the script's own run (a step that errors, a hub that drops the message) is not seen
+    by the integration, and the card is treated as delivered.
+  - Taking an earlier alert off the phones (a `shadow` card, which is sent when alerts are off,
+    and `joined` stories) is not something a script can do for the integration, so those
+    `clear_notification` messages always go straight to the phones chosen in the same option
+    form, not to whatever devices the script delivers to. Pick the phones the script delivers
+    to as well, or a phone the script reached may keep showing a stale alert.
+  - The answer to the engine (200 or 500) is judged on the card's own delivery, never on those
+    clears: 200 if the script took it or at least one phone got it (when the script fails), 500
+    only if nothing got through, so the engine resends. A failed delivery with a successful
+    clear is still 500. A card with no delivery of its own (alerts off) is judged on its
+    clears. The card and the clears are sent together, so a slow clear doesn't delay the card.
 
 Other message types (`"type": "sound"`) are sound requests for a receiver that plays sounds;
 answer them 2xx and ignore them unless the integration plays sounds.

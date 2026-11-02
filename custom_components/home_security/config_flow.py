@@ -19,6 +19,8 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.network import NoURLAvailableError
 from homeassistant.helpers.selector import (
+    EntitySelector,
+    EntitySelectorConfig,
     SelectSelector,
     SelectSelectorConfig,
     SelectSelectorMode,
@@ -31,10 +33,13 @@ from .api import EngineCodeRefused, EngineConnectionError, EngineError, async_pa
 from .const import (
     CONF_CODE,
     CONF_PHONES,
+    CONF_SCRIPT,
+    CONF_SCRIPT_SOURCE,
     CONF_TOKEN,
     CONF_URL,
     CONF_WEBHOOK_ID,
     CONF_WEBHOOK_SECRET,
+    DEFAULT_SCRIPT_SOURCE,
     DOMAIN,
     NAME,
     PAIR_NAME,
@@ -190,15 +195,20 @@ class HomeSecurityConfigFlow(ConfigFlow, domain=DOMAIN):
 
 
 class HomeSecurityOptionsFlow(OptionsFlow):
-    """Which phones get alerts."""
+    """Which phones get alerts, and an optional script the guard's cards go through."""
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         if user_input is not None:
-            return self.async_create_entry(
-                data={CONF_PHONES: list(user_input.get(CONF_PHONES, []))}
-            )
+            options: dict[str, Any] = {CONF_PHONES: list(user_input.get(CONF_PHONES, []))}
+            if script := user_input.get(CONF_SCRIPT):
+                options[CONF_SCRIPT] = script
+                options[CONF_SCRIPT_SOURCE] = (
+                    user_input.get(CONF_SCRIPT_SOURCE) or ""
+                ).strip() or DEFAULT_SCRIPT_SOURCE
+            return self.async_create_entry(data=options)
 
-        chosen = list(self.config_entry.options.get(CONF_PHONES, []))
+        saved = self.config_entry.options
+        chosen = list(saved.get(CONF_PHONES, []))
         services = self.hass.services.async_services_for_domain("notify")
         # Keep earlier choices selectable even if that phone is currently gone.
         phones = sorted({s for s in services if s.startswith("mobile_app_")} | set(chosen))
@@ -209,6 +219,14 @@ class HomeSecurityOptionsFlow(OptionsFlow):
                         options=phones, multiple=True, mode=SelectSelectorMode.LIST
                     )
                 ),
+                vol.Optional(CONF_SCRIPT): EntitySelector(EntitySelectorConfig(domain="script")),
+                vol.Optional(CONF_SCRIPT_SOURCE): TextSelector(),
             }
         )
-        return self.async_show_form(step_id="init", data_schema=schema)
+        suggested = {
+            CONF_SCRIPT: saved.get(CONF_SCRIPT),
+            CONF_SCRIPT_SOURCE: saved.get(CONF_SCRIPT_SOURCE) or DEFAULT_SCRIPT_SOURCE,
+        }
+        return self.async_show_form(
+            step_id="init", data_schema=self.add_suggested_values_to_schema(schema, suggested)
+        )

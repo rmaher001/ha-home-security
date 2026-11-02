@@ -231,6 +231,9 @@ _ROUTES: tuple[tuple[str, re.Pattern[str], str], ...] = tuple(
         ("GET", r"api/v1/state", "open"),
         ("GET", r"api/v1/stories", "open"),
         ("GET", rf"api/v1/stories/{_ID}/picture\.jpg", "open"),
+        # A guard session's steps and the pictures they cite (by number).
+        ("GET", rf"api/v1/stories/{_ID}/detail", "open"),
+        ("GET", rf"api/v1/stories/{_ID}/pictures/[0-9]{{1,4}}\.jpg", "open"),
         ("POST", rf"api/v1/stories/{_ID}/fine", "open"),
         ("PUT", r"api/v1/mode", "open"),
         ("PUT", r"api/v1/alerts", "open"),

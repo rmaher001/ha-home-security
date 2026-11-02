@@ -3,6 +3,11 @@
 // file), and on the engine's own page. Only the data source differs; each element takes a
 // `source` with: subscribe(cb) -> unsubscribe, pictureUrl(id) -> Promise<url>,
 // markFine(id), setMode(mode). The callback gets {state, stories}.
+// A source may also have, for guard sessions (the week list asks only for stories whose kind
+// is "guard", and shows them when it does):
+// detail(id) -> Promise<{steps: [{line, choice, alert, pictures: [n]}], description}|null>
+// (null: no detail for that story), and stepPictureUrl(id, n) -> Promise<url> for a step's
+// picture number n. Without them the cards render as they always did.
 
 const LEVELS = {
   safety: { label: "SAFETY", word: "Safety", color: "#C62828" },
@@ -114,7 +119,7 @@ class HsElement extends HTMLElement {
     if (!this._source || !this.isConnected || this._unsubscribe) return;
     this._unsubscribe = this._source.subscribe((data) => {
       this._data = data;
-      if (data && (data.connected === false || !data.state)) {
+      if (this._offline()) {
         // The integration says so when the engine is out of reach: never show stale news.
         this._paint(
           el("div", { class: "card" }, el("div", { class: "empty muted", style: "padding:14px 16px" }, "Can't reach Home Security right now.")),
@@ -123,6 +128,11 @@ class HsElement extends HTMLElement {
       }
       this._draw();
     });
+  }
+  // Whether the engine is out of reach, so the cards show only the can't-reach message.
+  _offline() {
+    const data = this._data;
+    return !!data && (data.connected === false || !data.state);
   }
   // Render, then drop the pictures of stories no longer shown.
   _draw() {
@@ -217,11 +227,106 @@ class HsStory extends HsElement {
   }
 }
 
+// A guard session's description and steps: each step's line, the guard's note on it, and
+// the pictures it cited. Built once per story version and reused, so a push never reloads
+// them. The reply comes from the engine; whatever isn't well-formed is left out.
+function detailBlock(source, story, data) {
+  if (!data || typeof data !== "object") return null;
+  const nodes = [];
+  if (typeof data.description === "string" && data.description) {
+    nodes.push(el("p", { style: "margin:8px 0 0;font-size:14px;line-height:1.4" }, data.description));
+  }
+  for (const step of Array.isArray(data.steps) ? data.steps : []) {
+    if (!step || typeof step !== "object") continue;
+    const line = typeof step.line === "string" && step.line ? step.line : null;
+    const parts = [];
+    if (typeof step.choice === "string" && step.choice) parts.push(step.choice.replaceAll("_", " "));
+    if (typeof step.alert === "number" && Number.isFinite(step.alert)) parts.push(`${Math.round(step.alert * 100)}%`);
+    const numbers = (Array.isArray(step.pictures) ? step.pictures : []).filter(
+      (n) => Number.isInteger(n) && n >= 0 && n <= 9999,
+    );
+    const pictures = numbers.map((n) => {
+      const picture = el("img", {
+        alt: "",
+        style: "height:72px;border-radius:6px;background:#37474F",
+      });
+      picture.addEventListener("error", () => picture.remove());
+      Promise.resolve()
+        .then(() => source.stepPictureUrl(story.id, n))
+        .then(
+          (src) => (picture.src = src),
+          () => picture.remove(),
+        );
+      return picture;
+    });
+    if (!line && !parts.length && !pictures.length) continue;
+    nodes.push(
+      el(
+        "div",
+        { style: "margin-top:8px" },
+        line ? el("div", { style: "font-size:13px;line-height:1.4" }, line) : null,
+        parts.length ? el("div", { class: "muted", style: "font-size:12px" }, `Guard: ${parts.join(" ")}`) : null,
+        pictures.length ? el("div", { style: "display:flex;flex-wrap:wrap;gap:4px;margin-top:4px" }, pictures) : null,
+      ),
+    );
+  }
+  return nodes.length ? el("div", {}, nodes) : null;
+}
+
 // This week: every story, newest first; tap one for its picture and "That's fine".
 class HsWeek extends HsElement {
   constructor() {
     super();
     this._open = null;
+    this._details = new Map();
+  }
+  // A guard session's steps (the source's optional `detail`, asked only for guard stories):
+  // asked for once per story and its `updated`, when it is opened. The block, or null while
+  // loading / when there is none. A failed request is tried once more the next time the row
+  // is opened (see _reopened), never on a push.
+  _detail(story) {
+    const source = this._source;
+    if (story.kind !== "guard" || typeof source?.detail !== "function") return null;
+    if (this._detailSource !== source) {
+      this._detailSource = source;
+      this._details = new Map();
+    }
+    const key = pictureKey(story);
+    let entry = this._details.get(key);
+    if (!entry) {
+      entry = { block: null, failed: false, retried: false };
+      this._details.set(key, entry);
+      this._fetchDetail(source, story, key, entry);
+    }
+    return entry.block;
+  }
+  _fetchDetail(source, story, key, entry) {
+    entry.failed = false;
+    Promise.resolve()
+      .then(() => source.detail(story.id))
+      .then(
+        (data) => {
+          if (this._details.get(key) !== entry) return;
+          entry.block = detailBlock(source, story, data);
+          // Never paint over "can't reach": the answer is kept for when it is back.
+          if (entry.block && !this._offline()) this._draw();
+        },
+        () => {
+          if (this._details.get(key) === entry) entry.failed = true;
+        },
+      );
+  }
+  // The row was just opened: a detail that failed gets one more try.
+  _reopened(story) {
+    const entry = this._details.get(pictureKey(story));
+    if (!entry || !entry.failed || entry.retried) return;
+    entry.retried = true;
+    this._fetchDetail(this._source, story, pictureKey(story), entry);
+  }
+  _toggle(story, wasOpen) {
+    this._open = wasOpen ? null : story.id;
+    if (!wasOpen) this._reopened(story);
+    this._draw();
   }
   _render() {
     const stories = this._data?.stories || [];
@@ -244,6 +349,8 @@ class HsWeek extends HsElement {
           });
           detail.push(fine);
         }
+        const steps = this._detail(story);
+        if (steps) detail.push(steps);
       }
       const meta = [level.word, story.cameras.join(", "), when(story.started)];
       if (story.live) meta.push("now");
@@ -256,15 +363,11 @@ class HsWeek extends HsElement {
           tabindex: "0",
           "aria-expanded": open ? "true" : "false",
           style: "cursor:pointer",
-          onclick: () => {
-            this._open = open ? null : story.id;
-            this._draw();
-          },
+          onclick: () => this._toggle(story, open),
           onkeydown: (event) => {
             if (event.key === "Enter" || event.key === " ") {
               event.preventDefault();
-              this._open = open ? null : story.id;
-              this._draw();
+              this._toggle(story, open);
             }
           },
         },
@@ -278,6 +381,10 @@ class HsWeek extends HsElement {
         ),
       );
     });
+    // Keep what was fetched while the story is still listed, so closing and reopening a row
+    // doesn't ask again.
+    const listed = new Set(stories.map(pictureKey));
+    for (const key of this._details.keys()) if (!listed.has(key)) this._details.delete(key);
     this._paint(
       el(
         "div",

@@ -19,6 +19,9 @@ for your dashboards, and alerts on your phones.
 - **Phone alerts** through the Home Assistant app, iOS and Android. Each story is one
   notification that updates as the story changes, with its picture and a **That's fine**
   button. Urgent stories ring as critical alerts; quiet ones arrive without a sound.
+  Guard alerts (from the engine's perimeter guard) are time-sensitive, never critical, and
+  show a live view of the camera on iOS. Under **Configure** you can send them through a
+  script of yours (for example a notification hub) instead of straight to the phones.
 - **The Home Security panel** in Home Assistant's sidebar: the engine's own page (daily use and
   setup), passed through Home Assistant so it works anywhere you reach Home Assistant, even over
   Nabu Casa. It needs your Home Assistant login (changing the engine's settings needs an administrator);

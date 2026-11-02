@@ -14,6 +14,8 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from custom_components.home_security.const import (
     CONF_CODE,
     CONF_PHONES,
+    CONF_SCRIPT,
+    CONF_SCRIPT_SOURCE,
     CONF_TOKEN,
     CONF_URL,
     CONF_WEBHOOK_ID,
@@ -226,3 +228,89 @@ async def test_reconfigure(
     sent = engine.paired[-1]
     assert sent["webhook_url"] == f"{INTERNAL_URL}/api/webhook/{WEBHOOK_ID}"
     assert sent["webhook_secret"] == WEBHOOK_SECRET
+
+
+async def test_options_send_through_a_script(
+    hass: HomeAssistant, config_entry: MockConfigEntry
+) -> None:
+    config_entry.add_to_hass(hass)
+    result = await hass.config_entries.options.async_init(config_entry.entry_id)
+    keys = [str(k) for k in result["data_schema"].schema]
+    assert CONF_SCRIPT in keys
+    assert CONF_SCRIPT_SOURCE in keys
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        {CONF_PHONES: [], CONF_SCRIPT: "script.send_notification", CONF_SCRIPT_SOURCE: "a.b.c"},
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert config_entry.options == {
+        CONF_PHONES: [],
+        CONF_SCRIPT: "script.send_notification",
+        CONF_SCRIPT_SOURCE: "a.b.c",
+    }
+
+
+async def test_options_script_source_defaults(
+    hass: HomeAssistant, config_entry: MockConfigEntry
+) -> None:
+    config_entry.add_to_hass(hass)
+    result = await hass.config_entries.options.async_init(config_entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {CONF_SCRIPT: "script.send_notification"}
+    )
+    assert config_entry.options == {
+        CONF_PHONES: [],
+        CONF_SCRIPT: "script.send_notification",
+        CONF_SCRIPT_SOURCE: "security.guard.alert",
+    }
+
+
+async def test_options_script_source_blank_gets_the_default(
+    hass: HomeAssistant, config_entry: MockConfigEntry
+) -> None:
+    config_entry.add_to_hass(hass)
+    result = await hass.config_entries.options.async_init(config_entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {CONF_SCRIPT: "script.send_notification", CONF_SCRIPT_SOURCE: "  "}
+    )
+    assert config_entry.options[CONF_SCRIPT_SOURCE] == "security.guard.alert"
+
+
+async def test_options_clearing_the_script_drops_both(
+    hass: HomeAssistant, config_entry: MockConfigEntry
+) -> None:
+    config_entry.add_to_hass(hass)
+    hass.config_entries.async_update_entry(
+        config_entry,
+        options={CONF_PHONES: [], CONF_SCRIPT: "script.x", CONF_SCRIPT_SOURCE: "a.b"},
+    )
+    result = await hass.config_entries.options.async_init(config_entry.entry_id)
+    # The form offers what is saved.
+    suggested = {
+        str(k): k.description["suggested_value"]
+        for k in result["data_schema"].schema
+        if k.description and "suggested_value" in k.description
+    }
+    assert suggested[CONF_SCRIPT] == "script.x"
+    assert suggested[CONF_SCRIPT_SOURCE] == "a.b"
+    # An emptied field is simply absent from what the form sends back.
+    result = await hass.config_entries.options.async_configure(result["flow_id"], {})
+    assert config_entry.options == {CONF_PHONES: []}
+
+
+async def test_options_offer_the_default_source_and_only_scripts(
+    hass: HomeAssistant, config_entry: MockConfigEntry
+) -> None:
+    """Nothing saved yet: the source field suggests the default and no script is suggested."""
+    config_entry.add_to_hass(hass)
+    result = await hass.config_entries.options.async_init(config_entry.entry_id)
+    schema = result["data_schema"].schema
+    suggested = {
+        str(k): k.description["suggested_value"]
+        for k in schema
+        if k.description and "suggested_value" in k.description
+    }
+    assert suggested[CONF_SCRIPT_SOURCE] == "security.guard.alert"
+    assert not suggested.get(CONF_SCRIPT)
+    script_key = next(k for k in schema if k == CONF_SCRIPT)
+    assert schema[script_key].config["domain"] == ["script"]
