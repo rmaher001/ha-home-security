@@ -488,11 +488,7 @@ function playInPlace(clips, host, source, story, stop, shown, className, onState
       const video = el("video", { controls: true, playsinline: true, autoplay: true, preload: "auto", "aria-label": `Recording${stop.place ? `: ${stop.place}` : ""}` });
       video.muted = true;
       video.src = url;
-      // `hsActive`: playing, or about to (so the card holds still around it).
-      const set = (on) => {
-        video.hsActive = on;
-        onState?.(on);
-      };
+      const set = (on) => onState?.(on);
       video.addEventListener("playing", () => set(true));
       for (const type of ["pause", "ended"]) {
         video.addEventListener(type, () => {
@@ -509,14 +505,14 @@ function playInPlace(clips, host, source, story, stop, shown, className, onState
         clips.settle();
       });
       for (const other of clips.videos) {
-        other.hsActive = false;
         other.pause?.();
       }
       clips.videos.add(video);
       host.replaceChildren(video);
       if (className) host.setAttribute("class", className);
       set(true);
-      video.play?.()?.catch?.(() => {});
+      // A refused play leaves nothing playing: let the card settle.
+      video.play?.()?.catch?.(() => clips.settle());
     } catch {
       note("Couldn't load the recording.");
     } finally {
@@ -537,7 +533,7 @@ function visitBlock(source, story, data, visit, learn, kept) {
       const asked = Promise.resolve().then(() => source.stepPictureUrl(story.id, n));
       urls.set(n, asked);
       // A failed request isn't remembered: the next one asks again.
-      asked.catch(() => urls.get(n) === asked && urls.delete(n));
+      asked.catch(() => urls.delete(n));
     }
     return urls.get(n);
   };
@@ -619,6 +615,8 @@ function visitBlock(source, story, data, visit, learn, kept) {
       : null;
 
   const fineSlot = el("div", { class: "v-act v-pad" });
+  // Where the learn section sits: a newer answer for the same version goes in here, in place.
+  const learnHost = el("div", { class: "v-pad" }, learn);
 
   // The way they came: one row per stop, in the order the engine gave them.
   const route = [];
@@ -696,20 +694,20 @@ function visitBlock(source, story, data, visit, learn, kept) {
     figure,
     said ? el("div", { class: "v-pad" }, said) : null,
     fineSlot,
-    learn ? el("div", { class: "v-pad" }, learn) : null,
+    learnHost,
     routeSection,
     every,
   );
   // Taps and keys in here are for these controls, not for the row that opens and closes.
   for (const type of ["click", "keydown"]) block.addEventListener(type, (event) => event.stopPropagation());
   block.fineSlot = fineSlot;
+  block.learnHost = learnHost;
   block.state = viewState;
   // Whether a recording is playing (or about to), which the card waits out before it swaps
   // this block for a newer one; and pausing them all, for when the row is closed.
-  block.active = () => [...clips.videos].some((video) => video.hsActive);
+  block.active = () => [...clips.videos].some((video) => !video.paused && !video.ended);
   block.pause = () => {
     for (const video of clips.videos) {
-      video.hsActive = false;
       video.pause?.();
     }
   };
@@ -896,7 +894,12 @@ class HsWeek extends HsElement {
       this._fetchDetail(source, story, key, entry);
     }
     const shown = this._current.get(story.id) ?? null;
-    if (entry.loaded && entry.block !== shown && !shown?.active?.()) {
+    if (entry.loaded && entry.block !== shown && entry.block && shown?.key === key && shown.learnHost && entry.block.learnHost) {
+      // The same version asked for again (after a learn answer): only the learn section is
+      // new, so it goes into the block on screen, which keeps playing whatever it was playing.
+      shown.learnHost.replaceChildren(...Array.from(entry.block.learnHost.childNodes));
+      entry.block = shown;
+    } else if (entry.loaded && entry.block !== shown && !shown?.active?.()) {
       if (entry.block) {
         entry.block.onSettle = () => this._draw();
         this._current.set(story.id, entry.block);
@@ -917,6 +920,7 @@ class HsWeek extends HsElement {
           const before = entry.block;
           const shown = this._current.get(story.id);
           entry.block = detailBlock(source, story, data, () => this._fetchDetail(source, story, key, entry), this._draftsFor(story.id), shown?.state);
+          if (entry.block) entry.block.key = key;
           entry.loaded = true;
           // Never paint over "can't reach": the answer is kept for when it is back.
           if ((entry.block || before || shown) && !this._offline()) this._draw();

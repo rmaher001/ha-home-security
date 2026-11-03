@@ -1283,6 +1283,8 @@ test("focus is not pulled back to a box after the person moved on", async () => 
     week.shadowRoot.activeElement = own;
     source.push([guardStory("gA", { updated: "2026-10-27T09:20:00Z" })]);
     // The box on screen stays while the new detail comes, so the repaint itself keeps the focus.
+    assert.equal(spy.calls.length, 1);
+    assert.equal(spy.calls[0][0], own);
     spy.calls.length = 0;
     // Before the new detail arrives, the person taps a button instead.
     week.shadowRoot.activeElement = button(week, "None") || { hsKey: undefined };
@@ -1317,7 +1319,9 @@ test("focus moved elsewhere before the rebuild arrives is not pulled back", asyn
     const held = holdDetail(source, learn);
     source.push([guardStory("gA", { updated: "2026-10-27T09:20:00Z" })]);
     await settle();
-    spy.calls.length = 0; // (the repaint on the push kept the focus, as the box stays on screen)
+    assert.equal(spy.calls.length, 1); // the repaint on the push kept the focus: the box stays on screen
+    assert.equal(spy.calls[0][0], own);
+    spy.calls.length = 0;
     // The person taps elsewhere: focus leaves the box (not because of a repaint).
     week.shadowRoot.activeElement = null;
     week.shadowRoot.dispatch("focusout");
@@ -1366,7 +1370,9 @@ test("a request whose detail never arrives cannot steal focus later", async () =
     const held = holdDetail(source, learn);
     source.push([guardStory("gA", { updated: "2026-10-27T09:20:00Z" })]);
     await settle();
-    spy.calls.length = 0; // (the repaint on the push kept the focus, as the box stays on screen)
+    assert.equal(spy.calls.length, 1); // the repaint on the push kept the focus: the box stays on screen
+    assert.equal(spy.calls[0][0], own);
+    spy.calls.length = 0;
     week.shadowRoot.activeElement = null;
     held.reject();
     await settle();
@@ -1742,7 +1748,12 @@ function trackVideos() {
     const node = real.call(document, tag);
     if (tag === "video") {
       node.pauses = 0;
-      node.pause = () => node.pauses++;
+      node.paused = true; // as a real one is until it plays
+      node.ended = false;
+      node.pause = () => {
+        node.pauses++;
+        node.paused = true;
+      };
       made.push(node);
     }
     return node;
@@ -1765,6 +1776,7 @@ test("a newer version of the open story keeps the visit view up, and a playing v
     await settle();
     const video = week.shadowRoot.querySelector("video");
     assert.ok(video);
+    video.paused = false; // it is playing
 
     answer = visitDetail();
     answer.visit.headline = "Rowan alone at the garage";
@@ -1778,6 +1790,7 @@ test("a newer version of the open story keeps the visit view up, and a playing v
     }
     assert.ok(!texts(week).includes("Rowan alone at the garage"));
     // The video pauses, and the new detail takes its place.
+    video.paused = true;
     video.dispatch("pause");
     assert.ok(texts(week).includes("Rowan alone at the garage"));
     assert.equal(week.shadowRoot.querySelectorAll("video").length, 0);
@@ -1817,6 +1830,7 @@ test("closing the row stops a playing video, and reopening shows the newer detai
     byClass(week, "button", "v-play").dispatch("click");
     await settle();
     const video = week.shadowRoot.querySelector("video");
+    video.paused = false;
     answer = visitDetail();
     answer.visit.headline = "Rowan alone at the garage";
     source.push([guardStory("gV", { title: TRIAL_TITLE, updated: NEWER })]);
@@ -2011,4 +2025,242 @@ test("starting a recording pauses the one already playing", async () => {
   } finally {
     track.restore();
   }
+});
+
+test("a focus request the new block cannot satisfy is dropped, not pulled onto a later box", async () => {
+  const learn = { state: "choosing", notes: NOTES, kept: null };
+  const { source, week } = await openLearn(learn);
+  const own = boxes(week)[2];
+  const spy = recordFocus(own);
+  try {
+    week.shadowRoot.activeElement = own;
+    source.detail = async () => ({ ...DETAIL, learn: { state: "kept", notes: [], kept: "Maple is a dog." } });
+    source.push([guardStory("gA", { updated: "2026-10-27T09:20:00Z" })]);
+    assert.equal(spy.calls.length, 1);
+    assert.equal(spy.calls[0][0], own);
+    await settle();
+    await settle();
+    assert.equal(boxes(week).length, 0);
+    spy.calls.length = 0;
+    week.shadowRoot.activeElement = null;
+    source.detail = async () => ({ ...DETAIL, learn });
+    source.push([guardStory("gA", { updated: "2026-10-27T09:30:00Z" })]);
+    await settle();
+    await settle();
+    assert.equal(boxes(week).length, 3);
+    assert.equal(spy.calls.length, 0);
+  } finally {
+    spy.restore();
+  }
+});
+
+// A swap that waits for a playing recording leaves a focus request open when it finally lands
+// on a block with no such box: the windows the next two tests use.
+async function focusWindow() {
+  const track = trackVideos();
+  const learn = { state: "choosing", notes: NOTES, kept: null };
+  let answer = visitDetail({ learn });
+  const source = withClips(withDetail(fakeSource(), answer));
+  source.detail = async () => answer;
+  source.learn = async () => {};
+  const week = await openVisit(source);
+  byClass(week, "button", "v-play").dispatch("click");
+  await settle();
+  const video = week.shadowRoot.querySelector("video");
+  video.paused = false;
+  const own = boxes(week)[2];
+  const spy = recordFocus(own);
+  week.shadowRoot.activeElement = own;
+  // A newer version that has no boxes arrives, and waits for the recording.
+  answer = visitDetail({ learn: { state: "kept", notes: [], kept: "Maple is a dog." } });
+  source.push([guardStory("gV", { title: TRIAL_TITLE, updated: NEWER })]);
+  await settle();
+  await settle();
+  assert.equal(boxes(week).length, 3, "still the old block");
+  // The recording stops; the new block lands, and the focus request has nowhere to go.
+  video.paused = true;
+  video.dispatch("pause");
+  assert.equal(boxes(week).length, 0);
+  spy.calls.length = 0;
+  return {
+    source,
+    week,
+    spy,
+    again: () => {
+      answer = visitDetail({ learn });
+    },
+    done: () => {
+      spy.restore();
+      track.restore();
+    },
+  };
+}
+
+test("moving focus elsewhere cancels a focus request that found no box", async () => {
+  const w = await focusWindow();
+  try {
+    w.week.shadowRoot.activeElement = null;
+    w.week.shadowRoot.dispatch("focusout");
+    w.again();
+    w.source.push([guardStory("gV", { title: TRIAL_TITLE, updated: "2026-10-27T09:40:00Z" })]);
+    await settle();
+    await settle();
+    assert.equal(boxes(w.week).length, 3);
+    assert.equal(w.spy.calls.length, 0);
+  } finally {
+    w.done();
+  }
+});
+
+test("a failed fetch drops a focus request that found no box", async () => {
+  const w = await focusWindow();
+  try {
+    w.week.shadowRoot.activeElement = null; // no focusout event: the request is still open
+    w.source.detail = async () => {
+      throw new Error("nope");
+    };
+    w.source.push([guardStory("gV", { title: TRIAL_TITLE, updated: "2026-10-27T09:40:00Z" })]);
+    await settle();
+    await settle();
+    w.again();
+    w.source.detail = async () => visitDetail({ learn: { state: "choosing", notes: NOTES, kept: null } });
+    w.source.push([guardStory("gV", { title: TRIAL_TITLE, updated: "2026-10-27T09:50:00Z" })]);
+    await settle();
+    await settle();
+    assert.equal(boxes(w.week).length, 3);
+    assert.equal(w.spy.calls.length, 0);
+  } finally {
+    w.done();
+  }
+});
+
+test("a video that never plays does not hold back a newer version", async () => {
+  const track = trackVideos();
+  try {
+    let answer = visitDetail();
+    const source = withClips(withDetail(fakeSource(), answer));
+    source.detail = async () => answer;
+    const week = await openVisit(source);
+    byClass(week, "button", "v-play").dispatch("click");
+    await settle();
+    assert.equal(week.shadowRoot.querySelectorAll("video").length, 1); // inserted, but never `playing`
+    answer = visitDetail();
+    answer.visit.headline = "Rowan alone at the garage";
+    source.push([guardStory("gV", { title: TRIAL_TITLE, updated: NEWER })]);
+    await settle();
+    await settle();
+    assert.ok(texts(week).includes("Rowan alone at the garage"));
+  } finally {
+    track.restore();
+  }
+});
+
+test("a play() the browser refuses lets a held back version land", async () => {
+  const real = document.createElement;
+  document.createElement = (tag) => {
+    const node = real.call(document, tag);
+    if (tag === "video") {
+      node.paused = false; // loading, as far as anyone can tell
+      node.play = () =>
+        new Promise((_, reject) => {
+          node.refuse = () => {
+            node.paused = true;
+            reject(new Error("blocked"));
+          };
+        });
+    }
+    return node;
+  };
+  try {
+    let answer = visitDetail();
+    const source = withClips(withDetail(fakeSource(), answer));
+    source.detail = async () => answer;
+    const week = await openVisit(source);
+    byClass(week, "button", "v-play").dispatch("click");
+    await settle();
+    answer = visitDetail();
+    answer.visit.headline = "Rowan alone at the garage";
+    source.push([guardStory("gV", { title: TRIAL_TITLE, updated: NEWER })]);
+    await settle();
+    await settle();
+    assert.ok(!texts(week).includes("Rowan alone at the garage"), "held back while it may be playing");
+    week.shadowRoot.querySelector("video").refuse();
+    await settle();
+    assert.ok(texts(week).includes("Rowan alone at the garage"));
+  } finally {
+    document.createElement = real;
+  }
+});
+
+test("a held back version lands when the playing video fails", async () => {
+  const track = trackVideos();
+  try {
+    let answer = visitDetail();
+    const source = withClips(withDetail(fakeSource(), answer));
+    source.detail = async () => answer;
+    const week = await openVisit(source);
+    byClass(week, "button", "v-play").dispatch("click");
+    await settle();
+    const video = week.shadowRoot.querySelector("video");
+    video.paused = false;
+    answer = visitDetail();
+    answer.visit.headline = "Rowan alone at the garage";
+    source.push([guardStory("gV", { title: TRIAL_TITLE, updated: NEWER })]);
+    await settle();
+    await settle();
+    assert.ok(!texts(week).includes("Rowan alone at the garage"));
+    video.dispatch("error");
+    assert.ok(texts(week).includes("Rowan alone at the garage"));
+  } finally {
+    track.restore();
+  }
+});
+
+test("answering the learn offer while a recording plays updates the learn section in place", async () => {
+  const track = trackVideos();
+  try {
+    let answer = visitDetail({ learn: { state: "offered", notes: [], kept: null } });
+    const source = withClips(withDetail(fakeSource(), answer));
+    source.detail = async () => answer;
+    source.learn = async () => {
+      answer = visitDetail({ learn: { state: "declined", notes: [], kept: null } });
+    };
+    const week = await openVisit(source);
+    byClass(week, "button", "v-play").dispatch("click");
+    await settle();
+    const video = week.shadowRoot.querySelector("video");
+    video.paused = false;
+    button(week, "No").dispatch("click");
+    await settle();
+    await settle();
+    assert.ok(texts(week).includes("Not learned."));
+    assert.equal(week.shadowRoot.querySelector("video"), video, "the recording was not cut off");
+    assert.equal(button(week, "Learn from this"), undefined);
+  } finally {
+    track.restore();
+  }
+});
+
+test("a story that leaves the list takes its block with it", async () => {
+  const source = withClips(withDetail(fakeSource(), visitDetail()));
+  const week = await openVisit(source);
+  assert.ok(week._current.has("gV"));
+  source.push([]);
+  await settle();
+  assert.equal(week._current.has("gV"), false);
+});
+
+test("a newer version with no detail takes the old visit view away", async () => {
+  let answer = visitDetail();
+  const source = withClips(withDetail(fakeSource(), answer));
+  source.detail = async () => answer;
+  const week = await openVisit(source, "gV", { why: "Someone at the garage." });
+  assert.ok(texts(week).includes("Maple and Rowan at the garage"));
+  answer = null;
+  source.push([guardStory("gV", { title: TRIAL_TITLE, updated: NEWER, why: "Someone at the garage." })]);
+  await settle();
+  await settle();
+  assert.ok(!texts(week).includes("Maple and Rowan at the garage"));
+  assert.equal(week.shadowRoot.querySelectorAll("li").length, 0);
+  assert.ok(texts(week).includes("Someone at the garage."));
 });
