@@ -17,6 +17,17 @@
 // call that went through, the detail is asked for again. A source may say `canLearn: false`
 // (the Home Assistant source does for a user who isn't an administrator): the learn state is
 // then shown as text, with no buttons or boxes.
+// A guard detail may also have a `visit` field, which the week list shows in place of the
+// steps (they stay behind "Every look the guard took"):
+// {headline, names: [{name, by}], alerted: {stop, alert}|null, looks,
+//  stops: [{place, time, what, names: [{name, by}], picture, camera, alerted}]}
+// where each stop's `picture` is a step picture number (for stepPictureUrl), `camera` the
+// Protect camera id, `alerted` says it is the stop the guard alerted at (alerted.stop is that
+// stop's position in `stops`, and alerted.alert how sure it was, 0 to 1), and a stop's number
+// for clipUrl is its position in `stops`. A detail without `visit` is shown as it always was.
+// A source may also have clipUrl(id, stop) -> Promise<url>, the recording around one stop
+// (video/mp4): without it the visit view has no play buttons. And liveUrl(camera) -> url, where
+// the "Watch live" button goes (default: unifi-protect://protect/devices/<camera>).
 
 const LEVELS = {
   safety: { label: "SAFETY", word: "Safety", color: "#C62828" },
@@ -47,6 +58,68 @@ const STYLE = `
     border: 1px solid var(--primary-color, #0277BD); }
   .pill[disabled] { opacity: .5; cursor: default; }
   .empty { padding: 4px 16px 14px; font-size: 14px; }
+  :host { --hs-alerted: #f2a93b; --hs-family: #6fb3e0; --hs-stranger: #e5484d; --hs-rule: var(--divider-color, #e0e0e0); }
+  button:focus-visible, a:focus-visible, [role="button"]:focus-visible { outline: 2px solid var(--hs-family); outline-offset: 2px; }
+
+  /* The visit: the answer first, then the way they came. */
+  .row.open-visit { flex-wrap: wrap; }
+  .v { flex: 0 0 calc(100% + 32px); margin: 0 -16px -10px; min-width: 0; cursor: default; }
+  .v-pad { padding: 0 16px; }
+  .v-state { display: flex; align-items: center; gap: 8px; margin: 6px 0 4px; color: var(--hs-alerted); font-size: 15px; font-weight: 600; }
+  .v-state::before { content: ""; width: 10px; height: 10px; border-radius: 50%; background: var(--hs-alerted);
+    box-shadow: 0 0 0 4px rgba(242, 169, 59, .18); flex-shrink: 0; }
+  .v-state.v-quiet { color: var(--secondary-text-color, #616161); }
+  .v-state.v-quiet::before { background: var(--secondary-text-color, #9e9e9e); box-shadow: none; }
+  @media (prefers-reduced-motion: no-preference) {
+    .v-state:not(.v-quiet)::before { animation: v-glow 2.4s ease-in-out 2; }
+    @keyframes v-glow { 50% { box-shadow: 0 0 0 7px rgba(242, 169, 59, .08); } }
+  }
+  .v-head { margin: 0; font-size: 21px; line-height: 1.25; font-weight: 650; max-width: 24ch; text-wrap: balance; }
+  .v-who { margin: 6px 0 12px; font-size: 14px; color: var(--secondary-text-color, #616161); }
+  .v-name { color: var(--hs-family); font-weight: 600; }
+  .v-shot { position: relative; background: #37474F; aspect-ratio: 16 / 9; }
+  .v-shot img, .v-shot video { display: block; width: 100%; height: 100%; object-fit: cover; }
+  .v-play { position: absolute; inset: 0; display: grid; place-items: center; width: 100%; padding: 0; border: 0; background: none; }
+  .v-disc { display: grid; place-items: center; border-radius: 50%; background: rgba(0, 0, 0, .55); border: 1.5px solid rgba(255, 255, 255, .85); }
+  .v-play .v-disc { width: 56px; height: 56px; }
+  .v-tri { width: 0; height: 0; border-style: solid; border-color: transparent transparent transparent #fff; border-width: 10px 0 10px 17px; margin-left: 4px; }
+  .v-caption { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 16px 0;
+    font-size: 14px; color: var(--secondary-text-color, #616161); }
+  .v-live { display: inline-flex; align-items: center; gap: 7px; min-height: 36px; padding: 0 14px; box-sizing: border-box;
+    border: 1.5px solid var(--hs-rule); border-radius: 18px; color: var(--primary-text-color, #212121);
+    font-size: 14px; font-weight: 600; text-decoration: none; white-space: nowrap; }
+  .v-live::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--hs-stranger); }
+  .v-said { margin: 14px 0 0; font-size: 16px; line-height: 1.4; }
+  .v-said .muted { display: block; margin-top: 2px; font-size: 13px; }
+  .v-act { margin: 12px 0 0; }
+  .v-act:empty { display: none; }
+  .v-route { padding: 20px 16px 0; }
+  .v-route h4 { margin: 0 0 12px; font-size: 15px; font-weight: 600; color: var(--secondary-text-color, #616161); }
+  .v-route ol { list-style: none; margin: 0; padding: 0; }
+  .v-stop { display: grid; grid-template-columns: 74px 22px minmax(0, 1fr); column-gap: 8px; min-height: 54px; }
+  .v-time { white-space: nowrap; font-variant-numeric: tabular-nums; text-align: right; font-size: 14px; padding-top: 1px; color: var(--secondary-text-color, #616161); }
+  .v-line { position: relative; }
+  .v-line::before { content: ""; position: absolute; left: 10px; top: 0; bottom: 0; width: 2px; background: var(--hs-rule); }
+  .v-stop:first-child .v-line::before { top: 9px; }
+  .v-stop:last-child .v-line::before { bottom: auto; height: 9px; }
+  .v-line::after { content: ""; position: absolute; left: 5px; top: 4px; width: 12px; height: 12px; box-sizing: border-box; border-radius: 50%;
+    background: var(--ha-card-background, var(--card-background-color, #fff)); border: 2px solid var(--secondary-text-color, #9e9e9e); }
+  .v-stop.v-known .v-line::after { border-color: var(--hs-family); }
+  .v-stop.v-here .v-line::after { background: var(--hs-alerted); border-color: var(--hs-alerted); }
+  .v-place { font-weight: 600; font-size: 15px; }
+  .v-what { margin: 1px 0 0; font-size: 14px; color: var(--secondary-text-color, #616161); }
+  .v-stop.v-here .v-what { color: var(--hs-alerted); }
+  .v-stop > div { padding-bottom: 14px; min-width: 0; }
+  .v-thumb { position: relative; display: block; width: 168px; max-width: 100%; margin: 6px 0 0; padding: 0; border: 0; background: #37474F;
+    border-radius: 6px; overflow: hidden; aspect-ratio: 16 / 9; }
+  .v-thumb img { display: block; width: 100%; height: 100%; object-fit: cover; }
+  .v-thumb .v-disc { position: absolute; left: 8px; bottom: 8px; width: 28px; height: 28px; }
+  .v-thumb .v-tri { border-width: 6px 0 6px 10px; margin-left: 2px; }
+  .v-clip { margin: 6px 0 0; max-width: 360px; }
+  .v-clip video { display: block; width: 100%; aspect-ratio: 16 / 9; background: #000; border-radius: 6px; }
+  .v-note { display: block; margin-top: 4px; font-size: 13px; color: var(--secondary-text-color, #616161); }
+  .v-every { text-align: left; margin: 0 0 0 104px; padding: 0; min-height: 44px; background: none; border: 0; color: var(--hs-family); font-size: 14px; }
+  .v-looks { padding: 0 16px 8px; }
 `;
 
 function el(tag, attrs = {}, ...children) {
@@ -255,15 +328,10 @@ class HsStory extends HsElement {
   }
 }
 
-// A guard session's description and steps: each step's line, the guard's note on it, and
-// the pictures it cited. Built once per story version and reused, so a push never reloads
-// them. The reply comes from the engine; whatever isn't well-formed is left out.
-function detailBlock(source, story, data, refetch, drafts) {
-  if (!data || typeof data !== "object") return null;
+// A step's nodes: its line, the guard's note on it, and the pictures it cited. `pictureFor`
+// (n -> Promise<url>) defaults to the source's own stepPictureUrl.
+function stepNodes(source, story, data, pictureFor = (n) => source.stepPictureUrl(story.id, n)) {
   const nodes = [];
-  if (typeof data.description === "string" && data.description) {
-    nodes.push(el("p", { style: "margin:8px 0 0;font-size:14px;line-height:1.4" }, data.description));
-  }
   for (const step of Array.isArray(data.steps) ? data.steps : []) {
     if (!step || typeof step !== "object") continue;
     const line = typeof step.line === "string" && step.line ? step.line : null;
@@ -280,7 +348,7 @@ function detailBlock(source, story, data, refetch, drafts) {
       });
       picture.addEventListener("error", () => picture.remove());
       Promise.resolve()
-        .then(() => source.stepPictureUrl(story.id, n))
+        .then(() => pictureFor(n))
         .then(
           (src) => (picture.src = src),
           () => picture.remove(),
@@ -298,9 +366,300 @@ function detailBlock(source, story, data, refetch, drafts) {
       ),
     );
   }
+  return nodes;
+}
+
+// A guard session's description and steps: each step's line, the guard's note on it, and
+// the pictures it cited. Built once per story version and reused, so a push never reloads
+// them. The reply comes from the engine; whatever isn't well-formed is left out. A detail
+// with a `visit` is shown as the visit view instead (see visitBlock): the block then has a
+// `fineSlot`, which the card fills with the That's fine button each time it draws.
+function detailBlock(source, story, data, refetch, drafts) {
+  if (!data || typeof data !== "object") return null;
   const learn = learnBlock(source, story, data.learn, refetch, drafts);
+  const visit = parseVisit(data.visit);
+  if (visit) return visitBlock(source, story, data, visit, learn);
+  const nodes = [];
+  if (typeof data.description === "string" && data.description) {
+    nodes.push(el("p", { style: "margin:8px 0 0;font-size:14px;line-height:1.4" }, data.description));
+  }
+  nodes.push(...stepNodes(source, story, data));
   if (learn) nodes.push(learn);
   return nodes.length ? el("div", {}, nodes) : null;
+}
+
+// ---- The visit view: who came, the picture that alerted, and the way they came ----
+
+const textOf = (value) => (typeof value === "string" && value.trim() ? value.trim() : null);
+
+// A time of day, or null when it isn't a time.
+function timeOfDay(iso) {
+  const date = new Date(iso);
+  if (typeof iso !== "string" || Number.isNaN(date.getTime())) return null;
+  return date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
+
+// A time of day; with the weekday when it isn't today.
+function clockTime(iso) {
+  const time = timeOfDay(iso);
+  if (time === null) return null;
+  const date = new Date(iso);
+  const now = new Date();
+  if (Date.now() - date < 86400000 && date.getDate() === now.getDate()) return time;
+  return `${date.toLocaleDateString([], { weekday: "short" })} ${time}`;
+}
+
+function parseNames(raw) {
+  const names = [];
+  for (const entry of Array.isArray(raw) ? raw : []) {
+    const name = textOf(entry?.name);
+    if (name) names.push({ name, by: textOf(entry.by) });
+  }
+  return names;
+}
+
+// The engine's visit, or null when it isn't one. Each stop keeps its position in the list:
+// that is the number its recording is asked for by.
+function parseVisit(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const stops = [];
+  (Array.isArray(raw.stops) ? raw.stops : []).forEach((stop, index) => {
+    if (!stop || typeof stop !== "object") return;
+    stops.push({
+      index,
+      place: textOf(stop.place),
+      time: textOf(stop.time),
+      what: textOf(stop.what),
+      names: parseNames(stop.names),
+      picture: Number.isInteger(stop.picture) && stop.picture >= 0 && stop.picture <= 9999 ? stop.picture : null,
+      camera: textOf(stop.camera),
+      alerted: stop.alerted === true,
+    });
+  });
+  const marked = raw.alerted && typeof raw.alerted === "object" ? raw.alerted : null;
+  let here = stops.find((stop) => stop.alerted);
+  if (!here && marked && Number.isInteger(marked.stop)) here = stops.find((stop) => stop.index === marked.stop);
+  return {
+    headline: textOf(raw.headline),
+    names: parseNames(raw.names),
+    stops,
+    here: here || null,
+    sure: typeof marked?.alert === "number" && Number.isFinite(marked.alert) ? Math.round(marked.alert * 100) : null,
+    looks: Number.isInteger(raw.looks) && raw.looks >= 0 ? raw.looks : null,
+  };
+}
+
+// Names in the family colour, how each was named quietly after it. Over the picture:
+// "Maple named by the face model, Rowan by Protect"; on a stop: "Maple, by the face model".
+function whoLine(names, onStop) {
+  const parts = [];
+  names.forEach(({ name, by }, i) => {
+    if (i) parts.push(onStop ? "; " : ", ");
+    parts.push(el("span", { class: "v-name" }, name));
+    if (by) parts.push(onStop ? `, by ${by}` : ` ${i === 0 ? "named by" : "by"} ${by}`);
+  });
+  return parts;
+}
+
+const upFirst = (text) => text.charAt(0).toUpperCase() + text.slice(1);
+
+// A recording that plays in place: `host` holds what is shown until it is tapped, then a
+// <video> that replaces it. A recording that can't be had puts the picture back with a note.
+function playInPlace(host, source, story, stop, shown, className) {
+  let noted = null;
+  const note = (words) => {
+    noted?.remove();
+    noted = el("span", { class: "v-note" }, words);
+    host.append(noted);
+  };
+  let busy = false;
+  return async () => {
+    if (busy) return;
+    busy = true;
+    try {
+      const url = await source.clipUrl(story.id, stop.index);
+      const video = el("video", { controls: true, playsinline: true, autoplay: true, preload: "auto", "aria-label": `Recording${stop.place ? `: ${stop.place}` : ""}` });
+      video.muted = true;
+      video.src = url;
+      video.addEventListener("error", () => {
+        host.replaceChildren(...shown);
+        note("Couldn't play the recording.");
+      });
+      host.replaceChildren(video);
+      if (className) host.setAttribute("class", className);
+      video.play?.()?.catch?.(() => {});
+    } catch {
+      note("Couldn't load the recording.");
+    } finally {
+      busy = false;
+    }
+  };
+}
+
+// The visit view for a guard detail that has one. The pieces are built once per story
+// version (so a push never reloads a picture or stops a playing recording); the That's fine
+// button goes in `fineSlot`, which the card fills each time it draws.
+function visitBlock(source, story, data, visit, learn) {
+  const canPlay = typeof source.clipUrl === "function";
+  const urls = new Map(); // a picture number -> its URL request, asked for once
+  const pictureUrl = (n) => {
+    if (!urls.has(n)) urls.set(n, Promise.resolve().then(() => source.stepPictureUrl(story.id, n)));
+    return urls.get(n);
+  };
+  const stepPicture = (n, cls) => {
+    const picture = el("img", { alt: "", class: cls });
+    picture.addEventListener("error", () => picture.remove());
+    if (typeof source.stepPictureUrl !== "function") {
+      picture.remove();
+      return picture;
+    }
+    pictureUrl(n).then(
+      (src) => (picture.src = src),
+      () => picture.remove(),
+    );
+    return picture;
+  };
+  const here = visit.here;
+  const trial = typeof story.title === "string" && story.title.startsWith("Trial:");
+
+  // The state line: when it alerted (or, if it didn't, when the visit was).
+  const when0 = clockTime(here?.time || visit.stops.find((stop) => stop.time)?.time || story.started);
+  const kind = here ? (trial ? "Trial alert" : "Alert") : trial ? "Trial visit" : "Visit";
+  const state = el("p", { class: here ? "v-state" : "v-state v-quiet" }, when0 ? `${kind} at ${when0}` : kind);
+
+  const top = [state];
+  if (visit.headline) top.push(el("h3", { class: "v-head" }, visit.headline));
+  if (visit.names.length) top.push(el("p", { class: "v-who" }, whoLine(visit.names, false)));
+
+  // The big picture: the alerted stop's own, else the story's.
+  const storyPicture = () => {
+    const picture = el("img", { alt: "" });
+    picture.addEventListener("error", () => picture.remove());
+    cachedPictureUrl(source, story).then(
+      (src) => (picture.src = src),
+      () => picture.remove(),
+    );
+    return picture;
+  };
+  const bigPicture =
+    here && here.picture !== null && typeof source.stepPictureUrl === "function" ? stepPicture(here.picture) : storyPicture();
+  const shot = el("div", { class: "v-shot" });
+  const shotShown = [bigPicture];
+  shot.append(bigPicture);
+  const camera = here?.camera ?? null;
+  if (here && canPlay) {
+    const play = el(
+      "button",
+      { class: "v-play", "aria-label": `Play the ${here.place ? `${here.place} ` : ""}recording` },
+      el("span", { class: "v-disc" }, el("span", { class: "v-tri" })),
+    );
+    shotShown.push(play);
+    shot.append(play);
+    play.addEventListener("click", playInPlace(shot, source, story, here, shotShown));
+  }
+  const figure = [shot];
+  if (here) {
+    const at = clockTime(here.time);
+    const words = `${here.place || "Here"}${at ? ` at ${at}` : ""}.${canPlay ? " Tap to play the recording." : ""}`;
+    const caption = el("div", { class: "v-caption" }, el("span", {}, words));
+    if (camera) {
+      const target = typeof source.liveUrl === "function" ? source.liveUrl(camera) : `unifi-protect://protect/devices/${encodeURIComponent(camera)}`;
+      caption.append(el("a", { class: "v-live", href: target, target: "_blank", rel: "noopener" }, "Watch live"));
+    }
+    figure.push(caption);
+  }
+
+  // Gemini's description, once.
+  const description = textOf(data.description);
+  const said = description
+    ? el("p", { class: "v-said" }, description, el("span", { class: "muted" }, "Described by Gemini"))
+    : textOf(story.why)
+      ? el("p", { class: "v-said" }, story.why)
+      : null;
+
+  const fineSlot = el("div", { class: "v-act v-pad" });
+
+  // The way they came: one row per stop, in the order the engine gave them.
+  const route = [];
+  for (const stop of visit.stops) {
+    const lines = [];
+    const sure = visit.sure === null ? "." : `, ${visit.sure}% sure.`;
+    if (stop === here) {
+      const what = stop.what ? `${upFirst(stop.what.replace(/[.!?]+$/, ""))}. ` : "";
+      lines.push(el("p", { class: "v-what" }, `${what}The guard alerted here${sure}`));
+    } else if (stop.what) {
+      lines.push(el("p", { class: "v-what" }, upFirst(stop.what)));
+    }
+    if (stop.names.length) lines.push(el("p", { class: "v-what" }, whoLine(stop.names, true)));
+    let media = null;
+    if (stop.picture !== null && typeof source.stepPictureUrl === "function") {
+      const thumb = stepPicture(stop.picture);
+      if (canPlay) {
+        const slot = el("div", { class: "v-clip-slot" });
+        const button = el(
+          "button",
+          { class: "v-thumb", "aria-label": `Play the ${stop.place ? `${stop.place} ` : ""}recording` },
+          thumb,
+          el("span", { class: "v-disc" }, el("span", { class: "v-tri" })),
+        );
+        const shown = [button];
+        slot.append(button);
+        button.addEventListener("click", playInPlace(slot, source, story, stop, shown, "v-clip-slot v-clip"));
+        media = slot;
+      } else {
+        media = el("div", { class: "v-thumb" }, thumb);
+      }
+    }
+    route.push(
+      el(
+        "li",
+        { class: `v-stop${stop === here ? " v-here" : stop.names.length ? " v-known" : ""}` },
+        el("span", { class: "v-time" }, timeOfDay(stop.time) || ""),
+        el("span", { class: "v-line" }),
+        el("div", {}, stop.place ? el("div", { class: "v-place" }, stop.place) : null, lines, media),
+      ),
+    );
+  }
+
+  // Every look the guard took: the step list, collapsed, built when first opened.
+  const looks = visit.looks ?? (Array.isArray(data.steps) ? data.steps.length : 0);
+  let every = null;
+  if (looks > 0 && Array.isArray(data.steps) && data.steps.length) {
+    const list = el("div", { class: "v-looks" });
+    let built = false;
+    const button = el("button", { class: "v-every", "aria-expanded": "false" }, `Every look the guard took (${looks})`);
+    const holder = el("div", {}, button);
+    button.addEventListener("click", () => {
+      const open = button.getAttribute("aria-expanded") !== "true";
+      button.setAttribute("aria-expanded", open ? "true" : "false");
+      if (open && !built) {
+        built = true;
+        list.append(...stepNodes(source, story, data, pictureUrl));
+      }
+      if (open) holder.append(list);
+      else list.remove();
+    });
+    every = holder;
+  }
+
+  const routeSection = visit.stops.length
+    ? el("section", { class: "v-route", "aria-label": "The way they came" }, el("h4", {}, "The way they came"), el("ol", {}, route))
+    : null;
+  const block = el(
+    "div",
+    { class: "v" },
+    el("div", { class: "v-pad" }, top),
+    figure,
+    said ? el("div", { class: "v-pad" }, said) : null,
+    fineSlot,
+    learn ? el("div", { class: "v-pad" }, learn) : null,
+    routeSection,
+    every,
+  );
+  // Taps and keys in here are for these controls, not for the row that opens and closes.
+  for (const type of ["click", "keydown"]) block.addEventListener(type, (event) => event.stopPropagation());
+  block.fineSlot = fineSlot;
+  return block;
 }
 
 // The engine keeps notes to 300 characters.
@@ -520,23 +879,35 @@ class HsWeek extends HsElement {
       const level = LEVELS[story.level] || LEVELS.calm;
       const open = this._open === story.id;
       const detail = [];
+      let visit = null; // the visit view, which stands in for the why, the picture and the button
       if (open) {
-        const picture = this._picture(
-          story,
-          "",
-          "display:block;width:100%;border-radius:8px;margin-top:8px;background:#37474F",
-        );
-        detail.push(el("p", { style: "margin:6px 0 0;font-size:14px;line-height:1.4" }, story.why), picture);
-        if (!story.fine && story.level !== "safety") {
-          const fine = el("button", { class: "pill", style: "margin-top:8px" }, "That's fine");
-          fine.addEventListener("click", (event) => {
+        const steps = this._detail(story);
+        const canFine = !story.fine && story.level !== "safety";
+        if (steps?.fineSlot) {
+          visit = steps;
+          const fine = canFine ? el("button", { class: "pill" }, "That's fine") : null;
+          fine?.addEventListener("click", (event) => {
             event.stopPropagation();
             this._fine(story.id, fine);
           });
-          detail.push(fine);
+          steps.fineSlot.replaceChildren(...(fine ? [fine] : []));
+        } else {
+          const picture = this._picture(
+            story,
+            "",
+            "display:block;width:100%;border-radius:8px;margin-top:8px;background:#37474F",
+          );
+          detail.push(el("p", { style: "margin:6px 0 0;font-size:14px;line-height:1.4" }, story.why), picture);
+          if (canFine) {
+            const fine = el("button", { class: "pill", style: "margin-top:8px" }, "That's fine");
+            fine.addEventListener("click", (event) => {
+              event.stopPropagation();
+              this._fine(story.id, fine);
+            });
+            detail.push(fine);
+          }
+          if (steps) detail.push(steps);
         }
-        const steps = this._detail(story);
-        if (steps) detail.push(steps);
       }
       const meta = [level.word, story.cameras.join(", "), when(story.started)];
       if (story.live) meta.push("now");
@@ -544,7 +915,7 @@ class HsWeek extends HsElement {
       return el(
         "div",
         {
-          class: "row",
+          class: visit ? "row open-visit" : "row",
           role: "button",
           tabindex: "0",
           "aria-expanded": open ? "true" : "false",
@@ -565,6 +936,7 @@ class HsWeek extends HsElement {
           el("span", { class: "muted", style: "font-size:12px" }, meta.join(" · ")),
           ...detail,
         ),
+        visit,
       );
     });
     // Keep what was fetched while the story is still listed, so closing and reopening a row
@@ -721,6 +1093,10 @@ function haSource(hass) {
     },
     async pictureUrl(id) {
       const { url } = await this.hass.callWS({ type: "home_security/picture_url", story_id: id });
+      return url;
+    },
+    async clipUrl(id, stop) {
+      const { url } = await this.hass.callWS({ type: "home_security/clip_url", story_id: id, stop });
       return url;
     },
     markFine(id) {

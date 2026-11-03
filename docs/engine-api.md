@@ -82,6 +82,12 @@ sends nothing. If the socket drops, reconnect with backoff.
 
 `GET /api/v1/stories/{id}/picture.jpg`: the story's picture (JPEG), or 404.
 
+`GET /api/v1/stories/{id}/clip/{stop}.mp4`: Protect's recording around one stop of a guard
+session's visit (`video/mp4`, `stop` is the stop's position in the detail's `visit.stops`), or 404.
+It may answer a `Range` request with `206`, so a player can seek. The integration streams it
+through and serves it to dashboards at `/api/home_security/clip/<id>/<stop>` (a signed path, from
+the `home_security/clip_url` websocket command).
+
 `POST /api/v1/stories/{id}/fine`: "That's fine". `200 {"result": "ok"}`, or `404`.
 
 `POST /api/v1/stories/{id}/learn` `{"choice": "keep", "text": "..."}`: the answer to the guard's
@@ -153,7 +159,8 @@ and `Authorization: Bearer <paired key>` counts as signed in. `?story=<id>` open
   `//` and trailing-slash variants are refused; everything else is `404`):
   - anyone signed in: `GET` the root; `GET page/home-security-cards-<anything>.js`; `GET
     api/v1/state`, `api/v1/stories`, `api/v1/stories/<id>/picture.jpg`, `api/v1/stories/<id>/detail`,
-    `api/v1/stories/<id>/pictures/<n>.jpg` (n is one to four digits); `POST
+    `api/v1/stories/<id>/pictures/<n>.jpg` (n is one to four digits),
+    `api/v1/stories/<id>/clip/<stop>.mp4` (stop is one to three digits); `POST
     api/v1/stories/<id>/fine`; `PUT api/v1/mode`, `api/v1/alerts`; `GET api/v1/ws` as a
     websocket.
   - administrators only (`403` for anyone else): `GET`/`POST page/setup`, `POST page/restore`,

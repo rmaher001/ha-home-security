@@ -1440,3 +1440,287 @@ test("the dashboard source follows the user's admin right", () => {
   assert.equal(make({ is_admin: true }).canLearn, true);
   assert.notEqual(make(undefined).canLearn, false);
 });
+
+// ---- The visit view: who came, the picture that alerted, and the way they came ----
+
+const at = (iso) => new Date(iso).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+// Stops a few minutes before now, so the times read as today's.
+const minutesAgo = (n) => new Date(Date.now() - n * 60000).toISOString();
+
+function visitDetail(changes = {}) {
+  return {
+    description: "Someone walks in past the two parked cars toward the house door.",
+    steps: [
+      { line: "Sidewalk: a person walking a dog", choice: "nothing", alert: 0.04, pictures: [0] },
+      { line: "Garage: someone comes in", choice: "alert", alert: 0.74, pictures: [1] },
+    ],
+    visit: {
+      headline: "Maple and Rowan at the garage",
+      names: [
+        { name: "Maple", by: "the face model" },
+        { name: "Rowan", by: "Protect" },
+      ],
+      alerted: { stop: 1, alert: 0.74 },
+      stops: [
+        { place: "Sidewalk", time: minutesAgo(12), what: "a person", names: [], picture: 0, camera: "cam-side", alerted: false },
+        { place: "Garage", time: minutesAgo(10), what: "someone came in", names: [], picture: 1, camera: "cam-garage", alerted: true },
+        { place: "Kitchen", time: minutesAgo(9), what: "a person", names: [{ name: "Maple", by: "the face model" }], picture: null, camera: null, alerted: false },
+      ],
+      looks: 102,
+    },
+    ...changes,
+  };
+}
+
+function withClips(source) {
+  source.clipAsked = [];
+  source.clipUrl = async (id, stop) => {
+    source.clipAsked.push([id, stop]);
+    return `/clip/${id}/${stop}`;
+  };
+  return source;
+}
+
+async function openVisit(source, id = "gV", changes = {}) {
+  const week = mount("hs-week", source);
+  source.push([guardStory(id, { title: "Trial: Maple and Rowan came home", ...changes })]);
+  await settle();
+  openFirst(week);
+  await settle();
+  await settle();
+  return week;
+}
+
+const idx = (text, needle) => {
+  const at = text.indexOf(needle);
+  assert.ok(at >= 0, `missing: ${needle}`);
+  return at;
+};
+
+test("a visit shows the state line, the headline, who, and the route in time order with the alerted stop marked", async () => {
+  const detail = visitDetail();
+  const source = withClips(withDetail(fakeSource(), detail));
+  const week = await openVisit(source);
+  const text = texts(week);
+  assert.ok(text.includes(`Trial alert at ${at(detail.visit.stops[1].time)}`));
+  assert.ok(text.includes("Maple and Rowan at the garage"));
+  assert.ok(text.includes("Maple named by the face model, Rowan by Protect"));
+  // The route: in the order given, with the alerted stop's words.
+  const route = week.shadowRoot.querySelectorAll("section")[0].textContent;
+  assert.ok(idx(route, "Sidewalk") < idx(route, "Garage"));
+  assert.ok(idx(route, "Garage") < idx(route, "Kitchen"));
+  assert.ok(text.includes("Someone came in. The guard alerted here, 74% sure."));
+  const stops = week.shadowRoot.querySelectorAll("li");
+  assert.equal(stops.length, 3);
+  assert.deepEqual(
+    stops.map((li) => li.getAttribute("class")),
+    ["v-stop", "v-stop v-here", "v-stop v-known"],
+  );
+  assert.ok(stops[2].textContent.includes("Maple, by the face model"));
+});
+
+test("an alert that is not a trial is called an alert, and the state line carries the alert's time", async () => {
+  const detail = visitDetail();
+  const source = withClips(withDetail(fakeSource(), detail));
+  const week = await openVisit(source, "gV", { title: "Maple at the garage" });
+  const text = texts(week);
+  assert.ok(text.includes(`Alert at ${at(detail.visit.stops[1].time)}`));
+  assert.doesNotMatch(text, /Trial alert/);
+});
+
+test("the description is shown once, with who wrote it, and the story's why is not shown beside it", async () => {
+  const source = withClips(withDetail(fakeSource(), visitDetail()));
+  const week = await openVisit(source, "gV", { why: visitDetail().description });
+  const text = texts(week);
+  const needle = "Someone walks in past the two parked cars";
+  assert.equal(text.split(needle).length - 1, 1);
+  assert.ok(text.includes("Described by Gemini"));
+});
+
+test("the big picture is the alerted stop's own, and the steps' pictures are not loaded until asked for", async () => {
+  // (The story's own picture is asked for while the detail is still on its way.)
+  const source = withClips(withDetail(fakeSource(), visitDetail()));
+  const week = await openVisit(source);
+  const srcs = week.shadowRoot.querySelectorAll("img").map((i) => i.src);
+  // The big picture and the route's thumbnails (stops 0 and 1), nothing from the story itself.
+  assert.deepEqual(srcs, ["/step/gV/1", "/step/gV/0", "/step/gV/1"]);
+  assert.deepEqual(source.stepAsked, [["gV", 1], ["gV", 0]]);
+});
+
+test("an alerted stop with no picture of its own shows the story's picture", async () => {
+  const detail = visitDetail();
+  detail.visit.stops[1].picture = null;
+  const source = withClips(withDetail(fakeSource(), detail));
+  const week = await openVisit(source);
+  assert.equal(week.shadowRoot.querySelectorAll("img")[0].src, "/signed/gV/1");
+});
+
+test("tapping the big picture's play button swaps the picture for a video at the clip's address", async () => {
+  const source = withClips(withDetail(fakeSource(), visitDetail()));
+  const week = await openVisit(source);
+  const big = week.shadowRoot.querySelectorAll("button").find((b) => b.getAttribute("class") === "v-play");
+  assert.ok(big);
+  assert.equal(week.shadowRoot.querySelectorAll("video").length, 0);
+  big.dispatch("click");
+  await settle();
+  const videos = week.shadowRoot.querySelectorAll("video");
+  assert.equal(videos.length, 1);
+  assert.equal(videos[0].src, "/clip/gV/1");
+  assert.equal(videos[0].getAttribute("controls"), "");
+  assert.equal(videos[0].getAttribute("playsinline"), "");
+  assert.equal(videos[0].getAttribute("autoplay"), "");
+  assert.deepEqual(source.clipAsked, [["gV", 1]]);
+  // The picture and the button it replaced are gone from the big picture.
+  assert.equal(big.parent, null);
+});
+
+test("a stop's thumbnail plays that stop's clip in its place, and a push does not stop it", async () => {
+  const source = withClips(withDetail(fakeSource(), visitDetail()));
+  const week = await openVisit(source);
+  const thumbs = week.shadowRoot.querySelectorAll("button").filter((b) => b.getAttribute("class") === "v-thumb");
+  assert.equal(thumbs.length, 2); // the kitchen has no picture
+  thumbs[0].dispatch("click");
+  await settle();
+  assert.deepEqual(source.clipAsked, [["gV", 0]]);
+  const video = week.shadowRoot.querySelector("video");
+  assert.equal(video.src, "/clip/gV/0");
+  assert.equal(thumbs[0].parent, null);
+  // A state push redraws the card; the playing video is the same one.
+  source.push([guardStory("gV", { title: "Trial: Maple and Rowan came home" })]);
+  await settle();
+  assert.equal(week.shadowRoot.querySelector("video"), video);
+});
+
+test("a recording that can't be had leaves the picture and says so", async () => {
+  const source = withClips(withDetail(fakeSource(), visitDetail()));
+  source.clipUrl = async () => {
+    throw new Error("nope");
+  };
+  const week = await openVisit(source);
+  week.shadowRoot.querySelectorAll("button").find((b) => b.getAttribute("class") === "v-play").dispatch("click");
+  await settle();
+  assert.equal(week.shadowRoot.querySelectorAll("video").length, 0);
+  assert.ok(texts(week).includes("Couldn't load the recording."));
+});
+
+test("without clipUrl there are no play buttons and the pictures stay pictures", async () => {
+  const source = withDetail(fakeSource(), visitDetail());
+  const week = await openVisit(source);
+  const classes = week.shadowRoot.querySelectorAll("button").map((b) => b.getAttribute("class"));
+  assert.ok(!classes.includes("v-play"));
+  assert.ok(!classes.includes("v-thumb"));
+  assert.ok(!texts(week).includes("Tap to play"));
+  assert.ok(texts(week).includes("Maple and Rowan at the garage"));
+  assert.equal(week.shadowRoot.querySelectorAll("img").length, 3);
+});
+
+test("Watch live goes to Protect for the alerted stop's camera, or to the source's own address", async () => {
+  const source = withClips(withDetail(fakeSource(), visitDetail()));
+  let week = await openVisit(source);
+  let live = week.shadowRoot.querySelectorAll("a").find((a) => a.textContent === "Watch live");
+  assert.equal(live.getAttribute("href"), "unifi-protect://protect/devices/cam-garage");
+
+  const other = withClips(withDetail(fakeSource(), visitDetail()));
+  other.liveUrl = (camera) => `/live/${camera}`;
+  week = await openVisit(other);
+  live = week.shadowRoot.querySelectorAll("a").find((a) => a.textContent === "Watch live");
+  assert.equal(live.getAttribute("href"), "/live/cam-garage");
+
+  // No camera on the alerted stop, no button.
+  const detail = visitDetail();
+  detail.visit.stops[1].camera = null;
+  week = await openVisit(withClips(withDetail(fakeSource(), detail)));
+  assert.equal(week.shadowRoot.querySelectorAll("a").length, 0);
+});
+
+test("Every look the guard took is collapsed until asked for, and then shows the steps", async () => {
+  const source = withClips(withDetail(fakeSource(), visitDetail()));
+  const week = await openVisit(source);
+  assert.ok(!texts(week).includes("Garage: someone comes in"));
+  const every = week.shadowRoot.querySelectorAll("button").find((b) => b.textContent === "Every look the guard took (102)");
+  assert.ok(every);
+  assert.equal(every.getAttribute("aria-expanded"), "false");
+  every.dispatch("click");
+  assert.equal(every.getAttribute("aria-expanded"), "true");
+  assert.ok(texts(week).includes("Garage: someone comes in"));
+  assert.ok(texts(week).includes("Guard: alert 74%"));
+  every.dispatch("click");
+  assert.equal(every.getAttribute("aria-expanded"), "false");
+  assert.ok(!texts(week).includes("Garage: someone comes in"));
+});
+
+test("That's fine and the learn block are still on a visit", async () => {
+  const detail = visitDetail({ learn: { state: "offered", notes: [], kept: null } });
+  const source = withClips(withDetail(fakeSource(), detail));
+  source.learn = async () => {};
+  const week = await openVisit(source);
+  assert.ok(button(week, "That's fine"));
+  assert.ok(button(week, "Learn from this"));
+  const text = texts(week);
+  assert.ok(idx(text, "That's fine") < idx(text, "Should the guard learn from this?"));
+  assert.ok(idx(text, "Should the guard learn from this?") < idx(text, "The way they came"));
+});
+
+test("an engine's text on a visit goes in as text, never as markup", async () => {
+  const detail = visitDetail();
+  detail.visit.headline = "<img src=x onerror=alert(1)> at the garage";
+  detail.visit.stops[0].place = "<b>Side</b>";
+  const source = withClips(withDetail(fakeSource(), detail));
+  const week = await openVisit(source);
+  assert.ok(texts(week).includes("<img src=x onerror=alert(1)> at the garage"));
+  assert.ok(texts(week).includes("<b>Side</b>"));
+  assert.equal(week.shadowRoot.querySelectorAll("b").length, 0);
+});
+
+test("a detail without a visit renders as it always did", async () => {
+  const source = withDetail(fakeSource());
+  const week = mount("hs-week", source);
+  source.push([guardStory("gA")]);
+  await settle();
+  openFirst(week);
+  await settle();
+  const text = texts(week);
+  assert.ok(text.includes("Someone at the door."));
+  assert.ok(text.includes("A man in a grey hoodie tries the side gate."));
+  assert.ok(text.includes("Patio: still there, tries the gate"));
+  assert.ok(button(week, "That's fine"));
+  assert.ok(!text.includes("Every look"));
+  assert.equal(week.shadowRoot.querySelectorAll("li").length, 0);
+  // A visit that is not an object is no visit.
+  const odd = withDetail(fakeSource(), { ...DETAIL, visit: "nope" });
+  const other = mount("hs-week", odd);
+  odd.push([guardStory("gB")]);
+  await settle();
+  openFirst(other);
+  await settle();
+  assert.ok(texts(other).includes("Someone at the door."));
+});
+
+test("a visit with no alert says it was a visit, and has no play on the big picture", async () => {
+  const detail = visitDetail();
+  detail.visit.alerted = null;
+  for (const stop of detail.visit.stops) stop.alerted = false;
+  const source = withClips(withDetail(fakeSource(), detail));
+  const week = await openVisit(source);
+  const text = texts(week);
+  assert.match(text, /Trial visit at /);
+  assert.ok(!text.includes("The guard alerted here"));
+  assert.ok(!week.shadowRoot.querySelectorAll("button").some((b) => b.getAttribute("class") === "v-play"));
+  assert.equal(week.shadowRoot.querySelectorAll("li").length, 3);
+});
+
+test("the dashboard source asks for a clip's signed address by story and stop", async () => {
+  const asked = [];
+  const card = document.createElement("home-security-card");
+  card.setConfig({ show: ["week"] });
+  card.hass = {
+    connection: {},
+    callWS: async (msg) => {
+      asked.push(msg);
+      return { url: "/api/home_security/clip/gA/2?authSig=x" };
+    },
+  };
+  const source = card._parts[0].source;
+  assert.equal(await source.clipUrl("gA", 2), "/api/home_security/clip/gA/2?authSig=x");
+  assert.deepEqual(asked, [{ type: "home_security/clip_url", story_id: "gA", stop: 2 }]);
+});
