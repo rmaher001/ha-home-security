@@ -84,7 +84,10 @@ sends nothing. If the socket drops, reconnect with backoff.
 
 `GET /api/v1/stories/{id}/clip/{stop}.mp4`: Protect's recording around one stop of a guard
 session's visit (`video/mp4`, `stop` is the stop's position in the detail's `visit.stops`), or 404.
-It may answer a `Range` request with `206`, so a player can seek. The integration streams it
+The engine must answer a `Range` request with `206` and a `Content-Range` (a file response
+does this), and a range it cannot satisfy with `416`; the integration passes `Range` and
+`If-Range` on and returns `206`, `416` and `404` to the browser as they are (any other engine
+failure is a `502`). It asks for the bytes uncompressed. The integration streams it
 through and serves it to dashboards at `/api/home_security/clip/<id>/<stop>` (a signed path, from
 the `home_security/clip_url` websocket command).
 

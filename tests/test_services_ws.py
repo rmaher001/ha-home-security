@@ -7,6 +7,7 @@ import hashlib
 from pathlib import Path
 
 import pytest
+from aiohttp import ClientError
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from pytest_homeassistant_custom_component.common import MockConfigEntry
@@ -15,6 +16,7 @@ from pytest_homeassistant_custom_component.typing import (
     WebSocketGenerator,
 )
 
+from custom_components.home_security.api import CLIP_TIMEOUT
 from custom_components.home_security.const import DOMAIN
 
 from .conftest import CLIP, PICTURE, REFUSAL, STORY, FakeEngine, setup_integration, wait_for
@@ -245,6 +247,7 @@ async def test_ws_clip_url(
         {"story_id": STORY["id"], "stop": -1},
         {"story_id": STORY["id"], "stop": 1000},
         {"story_id": STORY["id"], "stop": "1"},
+        {"story_id": STORY["id"], "stop": True},  # JSON true is not a stop number
     ):
         await client.send_json_auto_id({"type": "home_security/clip_url", **bad})
         assert not (await client.receive_json())["success"]
@@ -281,6 +284,81 @@ async def test_clip_view(
     assert (await http.get("/api/home_security/clip/bad.id/1")).status == 400
     assert (await http.get(f"/api/home_security/clip/{STORY['id']}/x")).status == 400
     assert (await http.get(f"/api/home_security/clip/{STORY['id']}/1234")).status == 400
+
+
+async def test_clip_view_passes_an_unsatisfiable_range_through_as_416(
+    hass: HomeAssistant,
+    engine: FakeEngine,
+    config_entry: MockConfigEntry,
+    hass_client: ClientSessionGenerator,
+) -> None:
+    await setup_integration(hass, config_entry)
+    http = await hass_client()
+    resp = await http.get(
+        f"/api/home_security/clip/{STORY['id']}/1", headers={"Range": f"bytes={len(CLIP) + 5}-"}
+    )
+    assert resp.status == 416
+    assert resp.headers["Content-Range"] == f"bytes */{len(CLIP)}"
+
+
+async def test_clip_view_passes_if_range_on_and_never_asks_for_compression(
+    hass: HomeAssistant,
+    engine: FakeEngine,
+    config_entry: MockConfigEntry,
+    hass_client: ClientSessionGenerator,
+) -> None:
+    await setup_integration(hass, config_entry)
+    http = await hass_client()
+    resp = await http.get(
+        f"/api/home_security/clip/{STORY['id']}/1",
+        headers={"Range": "bytes=0-9", "If-Range": '"abc"'},
+    )
+    assert resp.status == 206
+    seen = engine.echoes[-1]["headers"]
+    assert seen["Range"] == "bytes=0-9"
+    assert seen["If-Range"] == '"abc"'
+    assert seen["Accept-Encoding"] == "identity"
+
+
+def test_a_recording_gets_as_long_as_the_engine_needs_to_fetch_it() -> None:
+    # The engine fetches the recording from Protect before it sends its headers.
+    assert CLIP_TIMEOUT.total is None
+    assert CLIP_TIMEOUT.sock_read == 120
+
+
+async def test_clip_view_survives_an_engine_that_breaks_off_midway(
+    hass: HomeAssistant,
+    engine: FakeEngine,
+    config_entry: MockConfigEntry,
+    hass_client: ClientSessionGenerator,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    await setup_integration(hass, config_entry)
+    http = await hass_client()
+    engine.clip_mode = "broken"
+    resp = await http.get(f"/api/home_security/clip/{STORY['id']}/1")
+    with pytest.raises(ClientError):
+        await resp.read()  # cut short: the browser sees a broken video, not a crash
+    assert "Traceback" not in caplog.text
+    engine.clip_mode = None
+    assert await (await http.get(f"/api/home_security/clip/{STORY['id']}/1")).read() == CLIP
+
+
+async def test_clip_view_lets_go_of_the_engine_when_the_browser_hangs_up(
+    hass: HomeAssistant,
+    engine: FakeEngine,
+    config_entry: MockConfigEntry,
+    hass_client: ClientSessionGenerator,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    await setup_integration(hass, config_entry)
+    http = await hass_client()
+    engine.clip_mode = "slow"
+    resp = await http.get(f"/api/home_security/clip/{STORY['id']}/1")
+    assert len(await resp.content.readexactly(2048)) == 2048
+    resp.close()  # the browser gives up
+    await wait_for(lambda: engine.clip_stopped)
+    assert "Traceback" not in caplog.text
 
 
 async def test_cards_file_served_under_versioned_name(

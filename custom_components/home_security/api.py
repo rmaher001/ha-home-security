@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from typing import Any
 
 import aiohttp
 
 TIMEOUT = aiohttp.ClientTimeout(total=15)
-# A recording is a long body: no overall limit, but the engine must keep sending.
-CLIP_TIMEOUT = aiohttp.ClientTimeout(total=None, sock_connect=15, sock_read=60)
+# A recording is a long body: no overall limit, but the engine must keep sending. It fetches
+# the recording from Protect before it sends its headers, which can take tens of seconds.
+CLIP_TIMEOUT = aiohttp.ClientTimeout(total=None, sock_connect=15, sock_read=120)
 
 
 class EngineError(Exception):
@@ -177,22 +178,24 @@ class EngineClient:
 
     @asynccontextmanager
     async def async_clip(
-        self, story_id: str, stop: int, byte_range: str | None = None
+        self, story_id: str, stop: int, forward: Mapping[str, str] | None = None
     ) -> AsyncIterator[aiohttp.ClientResponse]:
         """Open the recording around one stop of a visit; the caller reads it inside the block.
 
-        `byte_range` is the browser's Range header, passed on so a player can seek.
+        `forward` holds the browser's Range and If-Range headers, passed on so a player can
+        seek. A 416 (a range the recording can't satisfy) is handed back for the caller to
+        pass on; other errors raise.
         """
-        headers = dict(self.headers)
-        if byte_range:
-            headers["Range"] = byte_range
+        headers = {**self.headers, "Accept-Encoding": "identity", **(forward or {})}
         try:
             async with self._session.get(
                 f"{self.url}/api/v1/stories/{story_id}/clip/{stop}.mp4",
                 headers=headers,
                 timeout=CLIP_TIMEOUT,
+                auto_decompress=False,  # the bytes are passed on as they come, with their length
             ) as resp:
-                _raise_for_status(resp.status)
+                if resp.status != 416:
+                    _raise_for_status(resp.status)
                 yield resp
         except (aiohttp.ClientError, TimeoutError) as err:
             raise EngineConnectionError(str(err)) from err

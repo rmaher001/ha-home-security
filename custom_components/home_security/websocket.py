@@ -27,7 +27,16 @@ from .const import (
 from .coordinator import HomeSecurityCoordinator, async_get_coordinator
 
 STORY_ID = vol.All(str, vol.Match(STORY_ID_RE))
-STOP = vol.All(int, vol.Range(min=0, max=999))
+
+
+def _not_a_bool(value: Any) -> Any:
+    """JSON true and false are ints to Python, but not stop numbers."""
+    if isinstance(value, bool):
+        raise vol.Invalid("expected int")
+    return value
+
+
+STOP = vol.All(_not_a_bool, int, vol.Range(min=0, max=999))
 LEARN_CHOICE = vol.All(str, vol.Match(CARD_ACTION_ID_RE))
 PICTURE_URL_LIFETIME = timedelta(hours=1)
 CLIP_URL_LIFETIME = timedelta(hours=1)

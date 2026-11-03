@@ -78,6 +78,8 @@ class FakeEngine:
         self.echoes: list[dict[str, Any]] = []
         self.server: TestServer | None = None
 
+        self.clip_mode: str | None = None  # "broken" or "slow": a recording that misbehaves
+        self.clip_stopped = False  # the "slow" recording stopped being read
         self.redirect_root = False
         self.want_snapshot = False
 
@@ -190,9 +192,31 @@ class FakeEngine:
         self.calls.append(("GET", "clip", (request.match_info["id"], request.match_info["stop"])))
         if request.match_info["id"] != STORY["id"] or request.match_info["stop"] != "1":
             return web.json_response({"error": "not found"}, status=404)
+        if self.clip_mode == "broken":
+            # Promise the whole recording, send a little, and hang up.
+            response = web.StreamResponse(headers={"Content-Length": str(len(CLIP))})
+            response.content_type = "video/mp4"
+            await response.prepare(request)
+            await response.write(CLIP[:100])
+            assert request.transport is not None
+            request.transport.close()
+            return response
+        if self.clip_mode == "slow":
+            response = web.StreamResponse()
+            response.content_type = "video/mp4"
+            await response.prepare(request)
+            try:
+                for _ in range(1000):
+                    await response.write(b"x" * 1024)
+                    await asyncio.sleep(0.02)
+            finally:
+                self.clip_stopped = True
+            return response
         if (asked := request.headers.get("Range", "")).startswith("bytes="):
             first, _, last = asked[len("bytes=") :].partition("-")
             start, end = int(first), int(last) if last else len(CLIP) - 1
+            if start >= len(CLIP):
+                return web.Response(status=416, headers={"Content-Range": f"bytes */{len(CLIP)}"})
             return web.Response(
                 status=206,
                 body=CLIP[start : end + 1],

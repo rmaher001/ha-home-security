@@ -55,6 +55,8 @@ class PictureView(HomeAssistantView):
 
 # What a player needs from the engine's answer to seek in a recording.
 CLIP_HEADERS = ("Content-Length", "Content-Range", "Accept-Ranges")
+# What the browser may ask of the recording: a part of it, if it still is the same one.
+CLIP_REQUEST_HEADERS = ("Range", "If-Range")
 
 
 class ClipView(HomeAssistantView):
@@ -70,11 +72,12 @@ class ClipView(HomeAssistantView):
         if (coordinator := async_get_coordinator(request.app[KEY_HASS])) is None:
             return web.Response(status=HTTPStatus.SERVICE_UNAVAILABLE)
 
+        forward = {
+            name: value for name in CLIP_REQUEST_HEADERS if (value := request.headers.get(name))
+        }
         response: web.StreamResponse | None = None
         try:
-            async with coordinator.client.async_clip(
-                story_id, int(stop), request.headers.get("Range")
-            ) as upstream:
+            async with coordinator.client.async_clip(story_id, int(stop), forward) as upstream:
                 headers = {
                     "Content-Type": upstream.headers.get("Content-Type", "video/mp4"),
                     "Cache-Control": "private, max-age=3600",
@@ -89,9 +92,13 @@ class ClipView(HomeAssistantView):
                 await response.write_eof()
         except EngineNotFound:
             return web.Response(status=HTTPStatus.NOT_FOUND)
-        except EngineError as err:
+        except (EngineError, ConnectionResetError) as err:
             if response is not None:
+                # Cut off midway, either side: hang up, so the player sees a short
+                # recording rather than waiting for the rest of a Content-Length that won't come.
                 _LOGGER.debug("The clip stream for %s broke off: %s", story_id, err)
+                if request.transport is not None:
+                    request.transport.close()
                 return response
             return web.Response(status=HTTPStatus.BAD_GATEWAY)
         return response
