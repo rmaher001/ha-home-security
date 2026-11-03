@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import hashlib
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from aiohttp import ClientError
@@ -359,6 +360,36 @@ async def test_clip_view_lets_go_of_the_engine_when_the_browser_hangs_up(
     resp.close()  # the browser gives up
     await wait_for(lambda: engine.clip_stopped)
     assert "Traceback" not in caplog.text
+
+
+async def test_clip_view_refuses_a_recording_the_engine_compressed(
+    hass: HomeAssistant,
+    engine: FakeEngine,
+    config_entry: MockConfigEntry,
+    hass_client: ClientSessionGenerator,
+) -> None:
+    await setup_integration(hass, config_entry)
+    http = await hass_client()
+    engine.clip_mode = "gzip"
+    # Passed on as it came, the body would not match the headers: a bad gateway, not bad video.
+    assert (await http.get(f"/api/home_security/clip/{STORY['id']}/1")).status == 502
+
+
+async def test_the_engine_is_asked_for_a_recording_with_the_recording_timeouts(
+    hass: HomeAssistant,
+    engine: FakeEngine,
+    config_entry: MockConfigEntry,
+    hass_client: ClientSessionGenerator,
+) -> None:
+    await setup_integration(hass, config_entry)
+    session = config_entry.runtime_data.coordinator.client.session
+    http = await hass_client()
+    with patch.object(session, "get", wraps=session.get) as get:
+        assert (await http.get(f"/api/home_security/clip/{STORY['id']}/1")).status == 200
+    kwargs = get.call_args.kwargs
+    assert kwargs["timeout"] is CLIP_TIMEOUT
+    assert kwargs["auto_decompress"] is False
+    assert kwargs["headers"]["Accept-Encoding"] == "identity"
 
 
 async def test_cards_file_served_under_versioned_name(

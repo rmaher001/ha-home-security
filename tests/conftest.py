@@ -78,7 +78,7 @@ class FakeEngine:
         self.echoes: list[dict[str, Any]] = []
         self.server: TestServer | None = None
 
-        self.clip_mode: str | None = None  # "broken" or "slow": a recording that misbehaves
+        self.clip_mode: str | None = None  # "broken", "slow" or "gzip": a recording that misbehaves
         self.clip_stopped = False  # the "slow" recording stopped being read
         self.redirect_root = False
         self.want_snapshot = False
@@ -201,6 +201,11 @@ class FakeEngine:
             assert request.transport is not None
             request.transport.close()
             return response
+        if self.clip_mode == "gzip":
+            # An engine that compresses anyway: the bytes would not match what a player expects.
+            return web.Response(
+                body=CLIP, content_type="video/mp4", headers={"Content-Encoding": "gzip"}
+            )
         if self.clip_mode == "slow":
             response = web.StreamResponse()
             response.content_type = "video/mp4"

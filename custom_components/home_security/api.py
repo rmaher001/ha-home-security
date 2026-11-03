@@ -196,6 +196,9 @@ class EngineClient:
             ) as resp:
                 if resp.status != 416:
                     _raise_for_status(resp.status)
+                if resp.headers.get("Content-Encoding", "identity").lower() != "identity":
+                    # Passed on with its own length, the bytes would not play.
+                    raise EngineError("the engine compressed the recording")
                 yield resp
         except (aiohttp.ClientError, TimeoutError) as err:
             raise EngineConnectionError(str(err)) from err

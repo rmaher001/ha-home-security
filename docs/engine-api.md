@@ -91,6 +91,31 @@ failure is a `502`). It asks for the bytes uncompressed. The integration streams
 through and serves it to dashboards at `/api/home_security/clip/<id>/<stop>` (a signed path, from
 the `home_security/clip_url` websocket command).
 
+`GET /api/v1/stories/{id}/detail`: a guard session's detail. Besides `steps` (each `{line,
+choice, alert, pictures: [n]}`), `description` and `learn`, it may have a `visit`, which the event
+page shows in place of the steps (a detail without one is shown as before):
+
+```json
+{"visit": {
+  "headline": "Maple and Rowan at the garage",
+  "trial": false,
+  "names": [{"name": "Maple", "by": "the face model"}, {"name": "Rowan", "by": "Protect"}],
+  "alerted": {"stop": 1, "alert": 0.74},
+  "stops": [{"place": "Garage", "time": "2026-11-02T04:17:00Z", "what": "a person",
+             "names": [{"name": "Maple", "by": "the face model"}],
+             "picture": 1, "camera": "<camera id>", "camera_time": "2026-11-02T04:16:50Z",
+             "alerted": true}],
+  "looks": 102}}
+```
+
+`headline` is "Maple and Rowan at the garage" or "Someone at the garage". `trial` says it was a
+trial alert (when absent, a story title starting `Trial:` counts as one). `alerted` is null when
+the guard did not alert; otherwise `stop` is the position in `stops` and `alert` how sure it was
+(0 to 1). Each stop's `picture` is a step picture number (`pictures/<n>.jpg`) or null, `camera` a
+Protect camera id or null, and `alerted` marks the stop the guard alerted at. `camera_time` is
+where the stop's recording starts; the cards ignore it. `looks` is how many looks the guard took.
+A stop's clip is asked for by its position in `stops`.
+
 `POST /api/v1/stories/{id}/fine`: "That's fine". `200 {"result": "ok"}`, or `404`.
 
 `POST /api/v1/stories/{id}/learn` `{"choice": "keep", "text": "..."}`: the answer to the guard's
