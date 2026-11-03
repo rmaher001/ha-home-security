@@ -16,6 +16,7 @@ from .app_proxy import async_get_app_access
 from .const import (
     APP_TICKET_SECONDS,
     CARD_ACTION_ID_RE,
+    CLIP_URL,
     LEARN_TEXT_MAX,
     MODES,
     PICTURE_URL,
@@ -26,8 +27,10 @@ from .const import (
 from .coordinator import HomeSecurityCoordinator, async_get_coordinator
 
 STORY_ID = vol.All(str, vol.Match(STORY_ID_RE))
+STOP = vol.All(int, vol.Range(min=0, max=999))
 LEARN_CHOICE = vol.All(str, vol.Match(CARD_ACTION_ID_RE))
 PICTURE_URL_LIFETIME = timedelta(hours=1)
+CLIP_URL_LIFETIME = timedelta(hours=1)
 
 
 @callback
@@ -40,6 +43,7 @@ def async_register_commands(hass: HomeAssistant) -> None:
         ws_set_mode,
         ws_subscribe,
         ws_picture_url,
+        ws_clip_url,
         ws_app_session,
     ):
         websocket_api.async_register_command(hass, command)
@@ -190,6 +194,22 @@ def ws_picture_url(
     """A signed picture path an <img> tag can load without a login header."""
     path = PICTURE_URL.format(story_id=msg["story_id"])
     connection.send_result(msg["id"], {"url": async_sign_path(hass, path, PICTURE_URL_LIFETIME)})
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "home_security/clip_url",
+        vol.Required("story_id"): STORY_ID,
+        vol.Required("stop"): STOP,
+    }
+)
+@callback
+def ws_clip_url(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """A signed path to the recording around one stop, for a <video> tag (no login header)."""
+    path = CLIP_URL.format(story_id=msg["story_id"], stop=msg["stop"])
+    connection.send_result(msg["id"], {"url": async_sign_path(hass, path, CLIP_URL_LIFETIME)})
 
 
 @websocket_api.websocket_command({vol.Required("type"): "home_security/app_session"})

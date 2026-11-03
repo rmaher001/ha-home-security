@@ -25,6 +25,7 @@ PAIR_CODE = "ABCD-EF23"
 WEBHOOK_ID = "test-webhook-id"
 WEBHOOK_SECRET = "test-webhook-secret"
 PICTURE = b"\xff\xd8\xff\xe0fake-jpeg\xff\xd9"
+CLIP = b"\x00\x00\x00\x18ftypmp42" + bytes(range(256)) * 40
 
 STATE: dict[str, Any] = {
     "version": "0.1.0",
@@ -106,6 +107,7 @@ class FakeEngine:
         app.router.add_get("/api/v1/ws", self._ws)
         app.router.add_get("/api/v1/stories", self._stories)
         app.router.add_get("/api/v1/stories/{id}/picture.jpg", self._picture)
+        app.router.add_get("/api/v1/stories/{id}/clip/{stop}.mp4", self._clip)
         app.router.add_post("/api/v1/stories/{id}/fine", self._fine)
         app.router.add_post("/api/v1/stories/{id}/learn", self._learn)
         app.router.add_post("/api/v1/sensors", self._sensors)
@@ -181,6 +183,23 @@ class FakeEngine:
         if request.match_info["id"] != STORY["id"]:
             return web.json_response({"error": "not found"}, status=404)
         return web.Response(body=PICTURE, content_type="image/jpeg")
+
+    async def _clip(self, request: web.Request) -> web.Response:
+        if not self._authorized(request):
+            return self._refuse()
+        self.calls.append(("GET", "clip", (request.match_info["id"], request.match_info["stop"])))
+        if request.match_info["id"] != STORY["id"] or request.match_info["stop"] != "1":
+            return web.json_response({"error": "not found"}, status=404)
+        if (asked := request.headers.get("Range", "")).startswith("bytes="):
+            first, _, last = asked[len("bytes=") :].partition("-")
+            start, end = int(first), int(last) if last else len(CLIP) - 1
+            return web.Response(
+                status=206,
+                body=CLIP[start : end + 1],
+                content_type="video/mp4",
+                headers={"Content-Range": f"bytes {start}-{end}/{len(CLIP)}"},
+            )
+        return web.Response(body=CLIP, content_type="video/mp4", headers={"Accept-Ranges": "bytes"})
 
     async def _fine(self, request: web.Request) -> web.Response:
         if not self._authorized(request):

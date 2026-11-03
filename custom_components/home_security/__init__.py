@@ -38,7 +38,7 @@ from .frontend import (
     async_serve_panel,
 )
 from .sensors import async_setup_sensors
-from .views import PictureView
+from .views import ClipView, PictureView
 from .websocket import async_register_commands
 
 PLATFORMS = [Platform.BINARY_SENSOR, Platform.SELECT, Platform.SENSOR, Platform.SWITCH]
@@ -65,6 +65,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     )
     async_register_commands(hass)
     hass.http.register_view(PictureView())
+    hass.http.register_view(ClipView())
     hass.http.register_view(SessionView())  # before the catch-all, which would swallow it
     hass.http.register_view(AppRootView())
     hass.http.register_view(AppProxyView())

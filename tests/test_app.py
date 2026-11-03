@@ -23,7 +23,7 @@ from custom_components.home_security.app_proxy import (
     async_get_app_access,
 )
 
-from .conftest import STORY, TOKEN, FakeEngine, setup_integration
+from .conftest import CLIP, STORY, TOKEN, FakeEngine, setup_integration
 
 BASE = "/api/home_security/app"
 HOUR = 3600
@@ -384,6 +384,8 @@ async def test_unloading_cuts_a_streaming_response(
         ("GET", f"api/v1/stories/{ID}/detail"),
         ("GET", f"api/v1/stories/{ID}/pictures/0.jpg"),
         ("GET", f"api/v1/stories/{ID}/pictures/9999.jpg"),
+        ("GET", f"api/v1/stories/{ID}/clip/0.mp4"),
+        ("GET", f"api/v1/stories/{ID}/clip/999.mp4"),
         ("POST", f"api/v1/stories/{ID}/fine"),
         ("PUT", "api/v1/mode"),
         ("PUT", "api/v1/alerts"),
@@ -471,6 +473,18 @@ BLOCKED = [
     ("GET", "api/v1/stories//detail"),
     ("GET", "api/v1/stories/a%20b/detail"),
     ("GET", f"api/v1/stories/{ID}/pictures/10000.jpg"),  # n is at most four digits
+    ("GET", f"api/v1/stories/{ID}/clip/1000.mp4"),  # a stop is at most three digits
+    ("GET", f"api/v1/stories/{ID}/clip/-1.mp4"),
+    ("GET", f"api/v1/stories/{ID}/clip/x.mp4"),
+    ("GET", f"api/v1/stories/{ID}/clip/.mp4"),
+    ("GET", f"api/v1/stories/{ID}/clip/1"),
+    ("GET", f"api/v1/stories/{ID}/clip/1.mp4/"),
+    ("GET", f"api/v1/stories/{ID}/clip/1.jpg"),
+    ("GET", f"api/v1/stories/{ID}/clip//1.mp4"),
+    ("GET", f"api/v1/stories/{ID}/clip/%2e%2e/1.mp4"),
+    ("POST", f"api/v1/stories/{ID}/clip/1.mp4"),
+    ("PUT", f"api/v1/stories/{ID}/clip/1.mp4"),
+    ("GET", "api/v1/stories//clip/1.mp4"),
     ("GET", f"api/v1/stories/{ID}/pictures/-1.jpg"),
     ("GET", f"api/v1/stories/{ID}/pictures/x.jpg"),
     ("GET", f"api/v1/stories/{ID}/pictures/"),
@@ -584,6 +598,24 @@ async def test_a_request_is_passed_on_with_the_key_added_here(
     assert resp.headers["X-Engine"] == "yes"
     assert "Set-Cookie" not in resp.headers  # the engine can't plant cookies in the browser
     assert "Keep-Alive" not in resp.headers
+
+
+async def test_a_recording_streams_through_and_can_be_sought(
+    hass: HomeAssistant, engine: FakeEngine, browser, clock: Clock
+) -> None:
+    path = f"{BASE}/api/v1/stories/{ID}/clip/1.mp4"
+    whole = await browser.get(path)
+    assert whole.status == 200
+    assert whole.headers["Content-Type"] == "video/mp4"
+    assert await whole.read() == CLIP
+    # The browser's Range goes to the engine and its partial answer comes back.
+    part = await browser.get(path, headers={"Range": "bytes=5-14"})
+    assert part.status == 206
+    assert part.headers["Content-Range"] == f"bytes 5-14/{len(CLIP)}"
+    assert await part.read() == CLIP[5:15]
+    assert engine.echoes[-1]["headers"]["Range"] == "bytes=5-14"
+    assert engine.echoes[-1]["headers"]["Authorization"] == f"Bearer {TOKEN}"
+    assert (await browser.get(f"{BASE}/api/v1/stories/{ID}/clip/2.mp4")).status == 404
 
 
 async def test_the_key_never_reaches_the_browser(

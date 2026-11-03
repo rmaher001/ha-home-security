@@ -17,7 +17,7 @@ from pytest_homeassistant_custom_component.typing import (
 
 from custom_components.home_security.const import DOMAIN
 
-from .conftest import PICTURE, REFUSAL, STORY, FakeEngine, setup_integration, wait_for
+from .conftest import CLIP, PICTURE, REFUSAL, STORY, FakeEngine, setup_integration, wait_for
 
 
 async def test_mark_fine_service(
@@ -213,6 +213,74 @@ async def test_picture_view(
 
     assert (await http.get("/api/home_security/picture/01JBNOSUCH")).status == 404
     assert (await http.get("/api/home_security/picture/bad.id")).status == 400
+
+
+async def test_ws_clip_url(
+    hass: HomeAssistant,
+    engine: FakeEngine,
+    config_entry: MockConfigEntry,
+    hass_ws_client: WebSocketGenerator,
+    hass_client_no_auth: ClientSessionGenerator,
+) -> None:
+    await setup_integration(hass, config_entry)
+    client = await hass_ws_client(hass)
+    await client.send_json_auto_id(
+        {"type": "home_security/clip_url", "story_id": STORY["id"], "stop": 1}
+    )
+    msg = await client.receive_json()
+    assert msg["success"]
+    url = msg["result"]["url"]
+    assert url.startswith(f"/api/home_security/clip/{STORY['id']}/1?authSig=")
+
+    # The signed path loads without a login, as a <video> tag needs.
+    http = await hass_client_no_auth()
+    resp = await http.get(url)
+    assert resp.status == 200
+    assert resp.headers["Content-Type"] == "video/mp4"
+    assert await resp.read() == CLIP
+
+    for bad in (
+        {"story_id": "../x", "stop": 1},
+        {"story_id": f"{STORY['id']}\n", "stop": 1},
+        {"story_id": STORY["id"], "stop": -1},
+        {"story_id": STORY["id"], "stop": 1000},
+        {"story_id": STORY["id"], "stop": "1"},
+    ):
+        await client.send_json_auto_id({"type": "home_security/clip_url", **bad})
+        assert not (await client.receive_json())["success"]
+
+
+async def test_clip_view(
+    hass: HomeAssistant,
+    engine: FakeEngine,
+    config_entry: MockConfigEntry,
+    hass_client: ClientSessionGenerator,
+    hass_client_no_auth: ClientSessionGenerator,
+) -> None:
+    await setup_integration(hass, config_entry)
+    path = f"/api/home_security/clip/{STORY['id']}/1"
+
+    anonymous = await hass_client_no_auth()
+    assert (await anonymous.get(path)).status == 401
+
+    http = await hass_client()
+    resp = await http.get(path)
+    assert resp.status == 200
+    assert resp.headers["Content-Type"] == "video/mp4"
+    assert resp.headers["Accept-Ranges"] == "bytes"
+    assert await resp.read() == CLIP
+
+    # A player seeking asks for a range; the engine's partial answer goes through.
+    part = await http.get(path, headers={"Range": "bytes=10-19"})
+    assert part.status == 206
+    assert part.headers["Content-Range"] == f"bytes 10-19/{len(CLIP)}"
+    assert await part.read() == CLIP[10:20]
+
+    assert (await http.get(f"/api/home_security/clip/{STORY['id']}/2")).status == 404
+    assert (await http.get("/api/home_security/clip/01JBNOSUCH/1")).status == 404
+    assert (await http.get("/api/home_security/clip/bad.id/1")).status == 400
+    assert (await http.get(f"/api/home_security/clip/{STORY['id']}/x")).status == 400
+    assert (await http.get(f"/api/home_security/clip/{STORY['id']}/1234")).status == 400
 
 
 async def test_cards_file_served_under_versioned_name(

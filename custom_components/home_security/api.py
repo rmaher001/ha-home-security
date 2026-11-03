@@ -10,6 +10,8 @@ from typing import Any
 import aiohttp
 
 TIMEOUT = aiohttp.ClientTimeout(total=15)
+# A recording is a long body: no overall limit, but the engine must keep sending.
+CLIP_TIMEOUT = aiohttp.ClientTimeout(total=None, sock_connect=15, sock_read=60)
 
 
 class EngineError(Exception):
@@ -167,6 +169,28 @@ class EngineClient:
                 f"{self.url}/api/v1/stories/{story_id}/picture.jpg",
                 headers=self.headers,
                 timeout=TIMEOUT,
+            ) as resp:
+                _raise_for_status(resp.status)
+                yield resp
+        except (aiohttp.ClientError, TimeoutError) as err:
+            raise EngineConnectionError(str(err)) from err
+
+    @asynccontextmanager
+    async def async_clip(
+        self, story_id: str, stop: int, byte_range: str | None = None
+    ) -> AsyncIterator[aiohttp.ClientResponse]:
+        """Open the recording around one stop of a visit; the caller reads it inside the block.
+
+        `byte_range` is the browser's Range header, passed on so a player can seek.
+        """
+        headers = dict(self.headers)
+        if byte_range:
+            headers["Range"] = byte_range
+        try:
+            async with self._session.get(
+                f"{self.url}/api/v1/stories/{story_id}/clip/{stop}.mp4",
+                headers=headers,
+                timeout=CLIP_TIMEOUT,
             ) as resp:
                 _raise_for_status(resp.status)
                 yield resp

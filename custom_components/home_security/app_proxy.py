@@ -235,6 +235,8 @@ _ROUTES: tuple[tuple[str, re.Pattern[str], str], ...] = tuple(
         # A guard session's steps and the pictures they cite (by number).
         ("GET", rf"api/v1/stories/{_ID}/detail", "open"),
         ("GET", rf"api/v1/stories/{_ID}/pictures/[0-9]{{1,4}}\.jpg", "open"),
+        # Protect's recording around one stop of a visit (video, streamed through).
+        ("GET", rf"api/v1/stories/{_ID}/clip/[0-9]{{1,3}}\.mp4", "open"),
         ("POST", rf"api/v1/stories/{_ID}/fine", "open"),
         ("PUT", r"api/v1/mode", "open"),
         ("PUT", r"api/v1/alerts", "open"),

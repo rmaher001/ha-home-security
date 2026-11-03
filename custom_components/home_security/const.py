@@ -31,6 +31,9 @@ ATTR_STORY_ID: Final = "story_id"
 SERVICE_MARK_FINE: Final = "mark_fine"
 
 PICTURE_URL: Final = "/api/home_security/picture/{story_id}"
+CLIP_URL: Final = "/api/home_security/clip/{story_id}/{stop}"
+# A visit has a handful of stops; the engine numbers them from 0.
+STOP_RE: Final = re.compile(r"\A[0-9]{1,3}\Z")
 PANEL_URL_PATH: Final = "home-security"
 PANEL_URL_PATH_PREFIX: Final = f"/{PANEL_URL_PATH}"
 PANEL_NAME: Final = "home-security-panel"
