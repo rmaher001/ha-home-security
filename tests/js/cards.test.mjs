@@ -1282,6 +1282,8 @@ test("focus is not pulled back to a box after the person moved on", async () => 
   try {
     week.shadowRoot.activeElement = own;
     source.push([guardStory("gA", { updated: "2026-10-27T09:20:00Z" })]);
+    // The box on screen stays while the new detail comes, so the repaint itself keeps the focus.
+    spy.calls.length = 0;
     // Before the new detail arrives, the person taps a button instead.
     week.shadowRoot.activeElement = button(week, "None") || { hsKey: undefined };
     await settle();
@@ -1315,6 +1317,7 @@ test("focus moved elsewhere before the rebuild arrives is not pulled back", asyn
     const held = holdDetail(source, learn);
     source.push([guardStory("gA", { updated: "2026-10-27T09:20:00Z" })]);
     await settle();
+    spy.calls.length = 0; // (the repaint on the push kept the focus, as the box stays on screen)
     // The person taps elsewhere: focus leaves the box (not because of a repaint).
     week.shadowRoot.activeElement = null;
     week.shadowRoot.dispatch("focusout");
@@ -1344,7 +1347,10 @@ test("a rebuild's own focus loss does not cancel the request", async () => {
     source.push([guardStory("gA", { updated: "2026-10-27T09:20:00Z" })]);
     await settle();
     await settle();
-    assert.equal(spy.calls.length, 1);
+    // The focus is kept through the repaint, and again on the box the new detail brings.
+    assert.equal(spy.calls.length, 2);
+    assert.equal(spy.calls[0][0], own);
+    assert.notEqual(spy.calls[1][0], own);
   } finally {
     spy.restore();
   }
@@ -1360,6 +1366,7 @@ test("a request whose detail never arrives cannot steal focus later", async () =
     const held = holdDetail(source, learn);
     source.push([guardStory("gA", { updated: "2026-10-27T09:20:00Z" })]);
     await settle();
+    spy.calls.length = 0; // (the repaint on the push kept the focus, as the box stays on screen)
     week.shadowRoot.activeElement = null;
     held.reject();
     await settle();
@@ -1723,4 +1730,285 @@ test("the dashboard source asks for a clip's signed address by story and stop", 
   const source = card._parts[0].source;
   assert.equal(await source.clipUrl("gA", 2), "/api/home_security/clip/gA/2?authSig=x");
   assert.deepEqual(asked, [{ type: "home_security/clip_url", story_id: "gA", stop: 2 }]);
+});
+
+// ---- The visit view: staying put while the story moves on, and the details of playing ----
+
+// Every video the cards make can be paused and counted.
+function trackVideos() {
+  const made = [];
+  const real = document.createElement;
+  document.createElement = (tag) => {
+    const node = real.call(document, tag);
+    if (tag === "video") {
+      node.pauses = 0;
+      node.pause = () => node.pauses++;
+      made.push(node);
+    }
+    return node;
+  };
+  return { made, restore: () => (document.createElement = real) };
+}
+
+const byClass = (week, tag, cls) => week.shadowRoot.querySelectorAll(tag).find((n) => n.getAttribute("class") === cls);
+const TRIAL_TITLE = "Trial: Maple and Rowan came home";
+const NEWER = "2026-10-27T09:30:00Z";
+
+test("a newer version of the open story keeps the visit view up, and a playing video stays until it pauses", async () => {
+  const track = trackVideos();
+  try {
+    let answer = visitDetail();
+    const source = withClips(withDetail(fakeSource(), answer));
+    source.detail = async () => answer;
+    const week = await openVisit(source);
+    byClass(week, "button", "v-play").dispatch("click");
+    await settle();
+    const video = week.shadowRoot.querySelector("video");
+    assert.ok(video);
+
+    answer = visitDetail();
+    answer.visit.headline = "Rowan alone at the garage";
+    source.push([guardStory("gV", { title: TRIAL_TITLE, updated: NEWER })]);
+    // At once, and after the new detail has come: the same visit view, the same video.
+    for (const _ of [0, 1, 2]) {
+      assert.ok(texts(week).includes("Maple and Rowan at the garage"));
+      assert.equal(week.shadowRoot.querySelector("video"), video);
+      assert.equal(week.shadowRoot.querySelectorAll("li").length, 3);
+      await settle();
+    }
+    assert.ok(!texts(week).includes("Rowan alone at the garage"));
+    // The video pauses, and the new detail takes its place.
+    video.dispatch("pause");
+    assert.ok(texts(week).includes("Rowan alone at the garage"));
+    assert.equal(week.shadowRoot.querySelectorAll("video").length, 0);
+  } finally {
+    track.restore();
+  }
+});
+
+test("with nothing playing, a newer version swaps in when its detail arrives, with no gap, and keeps Every look open", async () => {
+  let answer = visitDetail();
+  const source = withClips(withDetail(fakeSource(), answer));
+  source.detail = async () => answer;
+  const week = await openVisit(source);
+  button(week, "Every look the guard took (102)").dispatch("click");
+  assert.ok(texts(week).includes("Garage: someone comes in"));
+
+  answer = visitDetail();
+  answer.visit.headline = "Rowan alone at the garage";
+  source.push([guardStory("gV", { title: TRIAL_TITLE, updated: NEWER })]);
+  assert.ok(texts(week).includes("Maple and Rowan at the garage")); // still the old view, not the plain one
+  assert.equal(week.shadowRoot.querySelectorAll("li").length, 3);
+  await settle();
+  await settle();
+  assert.ok(texts(week).includes("Rowan alone at the garage"));
+  assert.ok(!texts(week).includes("Maple and Rowan at the garage"));
+  assert.ok(texts(week).includes("Garage: someone comes in"), "Every look stays open");
+  assert.equal(button(week, "Every look the guard took (102)").getAttribute("aria-expanded"), "true");
+});
+
+test("closing the row stops a playing video, and reopening shows the newer detail", async () => {
+  const track = trackVideos();
+  try {
+    let answer = visitDetail();
+    const source = withClips(withDetail(fakeSource(), answer));
+    source.detail = async () => answer;
+    const week = await openVisit(source);
+    byClass(week, "button", "v-play").dispatch("click");
+    await settle();
+    const video = week.shadowRoot.querySelector("video");
+    answer = visitDetail();
+    answer.visit.headline = "Rowan alone at the garage";
+    source.push([guardStory("gV", { title: TRIAL_TITLE, updated: NEWER })]);
+    await settle();
+    await settle();
+    openFirst(week); // close
+    assert.ok(video.pauses >= 1);
+    openFirst(week); // open again
+    await settle();
+    assert.ok(texts(week).includes("Rowan alone at the garage"));
+  } finally {
+    track.restore();
+  }
+});
+
+test("a picture address that failed is asked for again, not remembered", async () => {
+  const source = withClips(withDetail(fakeSource(), visitDetail()));
+  let first = true;
+  source.stepPictureUrl = async (id, n) => {
+    source.stepAsked.push([id, n]);
+    if (n === 0 && first) {
+      first = false;
+      throw new Error("nope");
+    }
+    return `/step/${id}/${n}`;
+  };
+  const week = await openVisit(source);
+  button(week, "Every look the guard took (102)").dispatch("click");
+  await settle();
+  assert.deepEqual(
+    source.stepAsked.filter(([, n]) => n === 0),
+    [["gV", 0], ["gV", 0]],
+  );
+  assert.ok(week.shadowRoot.querySelectorAll("img").some((i) => i.src === "/step/gV/0"));
+});
+
+test("the engine's trial flag decides, and the title's Trial: prefix is the fallback", async () => {
+  const cases = [
+    [true, "Maple at the garage", /Trial alert at /],
+    [false, TRIAL_TITLE, /^(?!.*Trial alert).*Alert at /s],
+    [undefined, TRIAL_TITLE, /Trial alert at /],
+    [undefined, "Maple at the garage", /^(?!.*Trial alert).*Alert at /s],
+  ];
+  for (const [trial, title, want] of cases) {
+    const detail = visitDetail();
+    if (trial !== undefined) detail.visit.trial = trial;
+    const week = await openVisit(withClips(withDetail(fakeSource(), detail)), "gV", { title });
+    assert.match(texts(week), want, `trial=${trial} title=${title}`);
+  }
+});
+
+test("an alerted stop whose picture is number 0 still gets its picture, its clip and its words", async () => {
+  const detail = visitDetail();
+  detail.visit.stops[1].picture = 0;
+  const source = withClips(withDetail(fakeSource(), detail));
+  const week = await openVisit(source);
+  assert.equal(week.shadowRoot.querySelectorAll("img")[0].src, "/step/gV/0");
+});
+
+test("the alerted stop can be named by position when no stop says so", async () => {
+  const detail = visitDetail();
+  for (const stop of detail.visit.stops) stop.alerted = false;
+  const source = withClips(withDetail(fakeSource(), detail));
+  const week = await openVisit(source);
+  const stops = week.shadowRoot.querySelectorAll("li");
+  assert.deepEqual(
+    stops.map((li) => li.getAttribute("class")),
+    ["v-stop", "v-stop v-here", "v-stop v-known"],
+  );
+  assert.ok(texts(week).includes("The guard alerted here, 74% sure."));
+  assert.match(texts(week), /lert at /);
+  byClass(week, "button", "v-play").dispatch("click");
+  await settle();
+  assert.deepEqual(source.clipAsked, [["gV", 1]]);
+});
+
+test("a stop that is not well-formed keeps the later stops' clip numbers", async () => {
+  const detail = visitDetail();
+  detail.visit.stops = [detail.visit.stops[0], "junk", { ...detail.visit.stops[1] }];
+  detail.visit.alerted = { stop: 2, alert: 0.74 };
+  const source = withClips(withDetail(fakeSource(), detail));
+  const week = await openVisit(source);
+  assert.equal(week.shadowRoot.querySelectorAll("li").length, 2);
+  byClass(week, "button", "v-play").dispatch("click");
+  await settle();
+  assert.deepEqual(source.clipAsked, [["gV", 2]]);
+});
+
+test("a double tap on play asks for the recording once", async () => {
+  const source = withClips(withDetail(fakeSource(), visitDetail()));
+  let release;
+  source.clipUrl = (id, stop) => {
+    source.clipAsked.push([id, stop]);
+    return new Promise((resolve) => (release = () => resolve("/clip/slow")));
+  };
+  const week = await openVisit(source);
+  const play = byClass(week, "button", "v-play");
+  play.dispatch("click");
+  play.dispatch("click");
+  release();
+  await settle();
+  assert.equal(source.clipAsked.length, 1);
+  assert.equal(week.shadowRoot.querySelectorAll("video").length, 1);
+});
+
+test("a recording that fails to play puts the picture and the button back, and tapping asks afresh", async () => {
+  const track = trackVideos();
+  try {
+    const source = withClips(withDetail(fakeSource(), visitDetail()));
+    const week = await openVisit(source);
+    const shot = byClass(week, "div", "v-shot");
+    byClass(week, "button", "v-play").dispatch("click");
+    await settle();
+    week.shadowRoot.querySelector("video").dispatch("error");
+    assert.equal(week.shadowRoot.querySelectorAll("video").length, 0);
+    assert.equal(shot.querySelectorAll("img").length, 1);
+    assert.ok(byClass(week, "button", "v-play"));
+    assert.ok(texts(week).includes("Couldn't play the recording."));
+    assert.equal(shot.getAttribute("class"), "v-shot");
+    // A thumbnail that failed the same way is no longer styled as a playing clip.
+    const slot = week.shadowRoot.querySelectorAll("div").find((d) => (d.getAttribute("class") || "").startsWith("v-clip-slot"));
+    byClass(week, "button", "v-thumb").dispatch("click");
+    await settle();
+    assert.equal(slot.getAttribute("class"), "v-clip-slot v-clip");
+    week.shadowRoot.querySelector("video").dispatch("error");
+    assert.equal(slot.getAttribute("class"), "v-clip-slot");
+    // Tap again: the address is asked for afresh.
+    byClass(week, "button", "v-play").dispatch("click");
+    await settle();
+    assert.deepEqual(source.clipAsked, [["gV", 1], ["gV", 0], ["gV", 1]]);
+    assert.equal(week.shadowRoot.querySelectorAll("video").length, 1);
+  } finally {
+    track.restore();
+  }
+});
+
+test("a picture that already failed is not put back when the recording fails", async () => {
+  const track = trackVideos();
+  try {
+    const source = withClips(withDetail(fakeSource(), visitDetail()));
+    source.stepPictureUrl = async (id, n) => {
+      if (n === 1) throw new Error("nope");
+      return `/step/${id}/${n}`;
+    };
+    const week = await openVisit(source);
+    const shot = byClass(week, "div", "v-shot");
+    assert.equal(shot.querySelectorAll("img").length, 0);
+    byClass(week, "button", "v-play").dispatch("click");
+    await settle();
+    week.shadowRoot.querySelector("video").dispatch("error");
+    assert.equal(shot.querySelectorAll("img").length, 0);
+    assert.ok(byClass(week, "button", "v-play"));
+  } finally {
+    track.restore();
+  }
+});
+
+test("the caption says the recording is playing, and goes back when it stops", async () => {
+  const track = trackVideos();
+  try {
+    const source = withClips(withDetail(fakeSource(), visitDetail()));
+    const week = await openVisit(source);
+    assert.ok(texts(week).includes("Tap to play the recording."));
+    byClass(week, "button", "v-play").dispatch("click");
+    await settle();
+    assert.ok(texts(week).includes("Playing the recording."));
+    assert.ok(!texts(week).includes("Tap to play the recording."));
+    week.shadowRoot.querySelector("video").dispatch("pause");
+    assert.ok(texts(week).includes("Tap to play the recording."));
+    week.shadowRoot.querySelector("video").dispatch("playing");
+    assert.ok(texts(week).includes("Playing the recording."));
+    week.shadowRoot.querySelector("video").dispatch("ended");
+    assert.ok(texts(week).includes("Tap to play the recording."));
+  } finally {
+    track.restore();
+  }
+});
+
+test("starting a recording pauses the one already playing", async () => {
+  const track = trackVideos();
+  try {
+    const source = withClips(withDetail(fakeSource(), visitDetail()));
+    const week = await openVisit(source);
+    byClass(week, "button", "v-play").dispatch("click");
+    await settle();
+    const [first] = track.made;
+    byClass(week, "button", "v-thumb").dispatch("click");
+    await settle();
+    assert.equal(track.made.length, 2);
+    assert.equal(first.pauses, 1);
+    assert.equal(track.made[1].pauses, 0);
+  } finally {
+    track.restore();
+  }
 });

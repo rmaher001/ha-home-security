@@ -19,12 +19,13 @@
 // then shown as text, with no buttons or boxes.
 // A guard detail may also have a `visit` field, which the week list shows in place of the
 // steps (they stay behind "Every look the guard took"):
-// {headline, names: [{name, by}], alerted: {stop, alert}|null, looks,
+// {headline, trial, names: [{name, by}], alerted: {stop, alert}|null, looks,
 //  stops: [{place, time, what, names: [{name, by}], picture, camera, alerted}]}
 // where each stop's `picture` is a step picture number (for stepPictureUrl), `camera` the
 // Protect camera id, `alerted` says it is the stop the guard alerted at (alerted.stop is that
 // stop's position in `stops`, and alerted.alert how sure it was, 0 to 1), and a stop's number
-// for clipUrl is its position in `stops`. A detail without `visit` is shown as it always was.
+// for clipUrl is its position in `stops`. `trial` (true or false, when the engine says) is
+// whether it was a trial alert; without it a story title starting "Trial:" counts as one. A detail without `visit` is shown as it always was.
 // A source may also have clipUrl(id, stop) -> Promise<url>, the recording around one stop
 // (video/mp4): without it the visit view has no play buttons. And liveUrl(camera) -> url, where
 // the "Watch live" button goes (default: unifi-protect://protect/devices/<camera>).
@@ -374,11 +375,11 @@ function stepNodes(source, story, data, pictureFor = (n) => source.stepPictureUr
 // them. The reply comes from the engine; whatever isn't well-formed is left out. A detail
 // with a `visit` is shown as the visit view instead (see visitBlock): the block then has a
 // `fineSlot`, which the card fills with the That's fine button each time it draws.
-function detailBlock(source, story, data, refetch, drafts) {
+function detailBlock(source, story, data, refetch, drafts, kept) {
   if (!data || typeof data !== "object") return null;
   const learn = learnBlock(source, story, data.learn, refetch, drafts);
   const visit = parseVisit(data.visit);
-  if (visit) return visitBlock(source, story, data, visit, learn);
+  if (visit) return visitBlock(source, story, data, visit, learn, kept);
   const nodes = [];
   if (typeof data.description === "string" && data.description) {
     nodes.push(el("p", { style: "margin:8px 0 0;font-size:14px;line-height:1.4" }, data.description));
@@ -441,6 +442,7 @@ function parseVisit(raw) {
   if (!here && marked && Number.isInteger(marked.stop)) here = stops.find((stop) => stop.index === marked.stop);
   return {
     headline: textOf(raw.headline),
+    trial: typeof raw.trial === "boolean" ? raw.trial : null,
     names: parseNames(raw.names),
     stops,
     here: here || null,
@@ -464,14 +466,19 @@ function whoLine(names, onStop) {
 const upFirst = (text) => text.charAt(0).toUpperCase() + text.slice(1);
 
 // A recording that plays in place: `host` holds what is shown until it is tapped, then a
-// <video> that replaces it. A recording that can't be had puts the picture back with a note.
-function playInPlace(host, source, story, stop, shown, className) {
+// <video> that replaces it. A recording that can't be had puts back what was shown (not a
+// picture that had already failed) with a note. `clips` is the visit's own list of videos:
+// starting one pauses the others, and `clips.settle` says a video has stopped. `onState(true
+// or false)` tells whether this one is playing. The address is asked for afresh on every play
+// (signed addresses expire).
+function playInPlace(clips, host, source, story, stop, shown, className, onState) {
   let noted = null;
   const note = (words) => {
     noted?.remove();
     noted = el("span", { class: "v-note" }, words);
     host.append(noted);
   };
+  const plain = host.getAttribute("class"); // what the host looks like when nothing plays
   let busy = false;
   return async () => {
     if (busy) return;
@@ -481,12 +488,34 @@ function playInPlace(host, source, story, stop, shown, className) {
       const video = el("video", { controls: true, playsinline: true, autoplay: true, preload: "auto", "aria-label": `Recording${stop.place ? `: ${stop.place}` : ""}` });
       video.muted = true;
       video.src = url;
+      // `hsActive`: playing, or about to (so the card holds still around it).
+      const set = (on) => {
+        video.hsActive = on;
+        onState?.(on);
+      };
+      video.addEventListener("playing", () => set(true));
+      for (const type of ["pause", "ended"]) {
+        video.addEventListener(type, () => {
+          set(false);
+          clips.settle();
+        });
+      }
       video.addEventListener("error", () => {
-        host.replaceChildren(...shown);
+        set(false);
+        clips.videos.delete(video);
+        if (plain) host.setAttribute("class", plain);
+        host.replaceChildren(...shown.filter((node) => !node.failed));
         note("Couldn't play the recording.");
+        clips.settle();
       });
+      for (const other of clips.videos) {
+        other.hsActive = false;
+        other.pause?.();
+      }
+      clips.videos.add(video);
       host.replaceChildren(video);
       if (className) host.setAttribute("class", className);
+      set(true);
       video.play?.()?.catch?.(() => {});
     } catch {
       note("Couldn't load the recording.");
@@ -499,28 +528,35 @@ function playInPlace(host, source, story, stop, shown, className) {
 // The visit view for a guard detail that has one. The pieces are built once per story
 // version (so a push never reloads a picture or stops a playing recording); the That's fine
 // button goes in `fineSlot`, which the card fills each time it draws.
-function visitBlock(source, story, data, visit, learn) {
+function visitBlock(source, story, data, visit, learn, kept) {
   const canPlay = typeof source.clipUrl === "function";
+  const clips = { videos: new Set(), settle: () => block.onSettle?.() };
   const urls = new Map(); // a picture number -> its URL request, asked for once
   const pictureUrl = (n) => {
-    if (!urls.has(n)) urls.set(n, Promise.resolve().then(() => source.stepPictureUrl(story.id, n)));
+    if (!urls.has(n)) {
+      const asked = Promise.resolve().then(() => source.stepPictureUrl(story.id, n));
+      urls.set(n, asked);
+      // A failed request isn't remembered: the next one asks again.
+      asked.catch(() => urls.get(n) === asked && urls.delete(n));
+    }
     return urls.get(n);
   };
   const stepPicture = (n, cls) => {
     const picture = el("img", { alt: "", class: cls });
-    picture.addEventListener("error", () => picture.remove());
-    if (typeof source.stepPictureUrl !== "function") {
+    const fail = () => {
+      picture.failed = true;
       picture.remove();
+    };
+    picture.addEventListener("error", fail);
+    if (typeof source.stepPictureUrl !== "function") {
+      fail();
       return picture;
     }
-    pictureUrl(n).then(
-      (src) => (picture.src = src),
-      () => picture.remove(),
-    );
+    pictureUrl(n).then((src) => (picture.src = src), fail);
     return picture;
   };
   const here = visit.here;
-  const trial = typeof story.title === "string" && story.title.startsWith("Trial:");
+  const trial = visit.trial ?? (typeof story.title === "string" && story.title.startsWith("Trial:"));
 
   // The state line: when it alerted (or, if it didn't, when the visit was).
   const when0 = clockTime(here?.time || visit.stops.find((stop) => stop.time)?.time || story.started);
@@ -534,11 +570,12 @@ function visitBlock(source, story, data, visit, learn) {
   // The big picture: the alerted stop's own, else the story's.
   const storyPicture = () => {
     const picture = el("img", { alt: "" });
-    picture.addEventListener("error", () => picture.remove());
-    cachedPictureUrl(source, story).then(
-      (src) => (picture.src = src),
-      () => picture.remove(),
-    );
+    const fail = () => {
+      picture.failed = true;
+      picture.remove();
+    };
+    picture.addEventListener("error", fail);
+    cachedPictureUrl(source, story).then((src) => (picture.src = src), fail);
     return picture;
   };
   const bigPicture =
@@ -547,6 +584,12 @@ function visitBlock(source, story, data, visit, learn) {
   const shotShown = [bigPicture];
   shot.append(bigPicture);
   const camera = here?.camera ?? null;
+  // The caption's words, which say when a recording is playing.
+  const at = here ? clockTime(here.time) : null;
+  const where = here ? `${here.place || "Here"}${at ? ` at ${at}` : ""}.` : "";
+  const captionText = el("span", {}, "");
+  const say = (playing) => captionText.replaceChildren(`${where}${canPlay ? (playing ? " Playing the recording." : " Tap to play the recording.") : ""}`);
+  say(false);
   if (here && canPlay) {
     const play = el(
       "button",
@@ -555,13 +598,11 @@ function visitBlock(source, story, data, visit, learn) {
     );
     shotShown.push(play);
     shot.append(play);
-    play.addEventListener("click", playInPlace(shot, source, story, here, shotShown));
+    play.addEventListener("click", playInPlace(clips, shot, source, story, here, shotShown, "", say));
   }
   const figure = [shot];
   if (here) {
-    const at = clockTime(here.time);
-    const words = `${here.place || "Here"}${at ? ` at ${at}` : ""}.${canPlay ? " Tap to play the recording." : ""}`;
-    const caption = el("div", { class: "v-caption" }, el("span", {}, words));
+    const caption = el("div", { class: "v-caption" }, captionText);
     if (camera) {
       const target = typeof source.liveUrl === "function" ? source.liveUrl(camera) : `unifi-protect://protect/devices/${encodeURIComponent(camera)}`;
       caption.append(el("a", { class: "v-live", href: target, target: "_blank", rel: "noopener" }, "Watch live"));
@@ -604,7 +645,7 @@ function visitBlock(source, story, data, visit, learn) {
         );
         const shown = [button];
         slot.append(button);
-        button.addEventListener("click", playInPlace(slot, source, story, stop, shown, "v-clip-slot v-clip"));
+        button.addEventListener("click", playInPlace(clips, slot, source, story, stop, shown, "v-clip-slot v-clip"));
         media = slot;
       } else {
         media = el("div", { class: "v-thumb" }, thumb);
@@ -623,14 +664,15 @@ function visitBlock(source, story, data, visit, learn) {
 
   // Every look the guard took: the step list, collapsed, built when first opened.
   const looks = visit.looks ?? (Array.isArray(data.steps) ? data.steps.length : 0);
+  const viewState = { looksOpen: false };
   let every = null;
   if (looks > 0 && Array.isArray(data.steps) && data.steps.length) {
     const list = el("div", { class: "v-looks" });
     let built = false;
     const button = el("button", { class: "v-every", "aria-expanded": "false" }, `Every look the guard took (${looks})`);
     const holder = el("div", {}, button);
-    button.addEventListener("click", () => {
-      const open = button.getAttribute("aria-expanded") !== "true";
+    const show = (open) => {
+      viewState.looksOpen = open;
       button.setAttribute("aria-expanded", open ? "true" : "false");
       if (open && !built) {
         built = true;
@@ -638,7 +680,9 @@ function visitBlock(source, story, data, visit, learn) {
       }
       if (open) holder.append(list);
       else list.remove();
-    });
+    };
+    button.addEventListener("click", () => show(button.getAttribute("aria-expanded") !== "true"));
+    if (kept?.looksOpen) show(true); // a newer version of the same visit keeps it open
     every = holder;
   }
 
@@ -659,6 +703,16 @@ function visitBlock(source, story, data, visit, learn) {
   // Taps and keys in here are for these controls, not for the row that opens and closes.
   for (const type of ["click", "keydown"]) block.addEventListener(type, (event) => event.stopPropagation());
   block.fineSlot = fineSlot;
+  block.state = viewState;
+  // Whether a recording is playing (or about to), which the card waits out before it swaps
+  // this block for a newer one; and pausing them all, for when the row is closed.
+  block.active = () => [...clips.videos].some((video) => video.hsActive);
+  block.pause = () => {
+    for (const video of clips.videos) {
+      video.hsActive = false;
+      video.pause?.();
+    }
+  };
   return block;
 }
 
@@ -811,6 +865,7 @@ class HsWeek extends HsElement {
     super();
     this._open = null;
     this._details = new Map();
+    this._current = new Map(); // story id -> the block on screen for it
     this._drafts = new Map(); // story id -> Map(box key -> typed text)
   }
   _draftsFor(id) {
@@ -821,7 +876,9 @@ class HsWeek extends HsElement {
   // A guard session's steps (the source's optional `detail`, asked only for guard stories):
   // asked for once per story and its `updated`, when it is opened. The block, or null while
   // loading / when there is none. A failed request is tried once more the next time the row
-  // is opened (see _reopened), never on a push.
+  // is opened (see _reopened), never on a push. When the story has moved on (a new `updated`)
+  // the block on screen stays until the new one has come, and while a recording is playing in
+  // it, until that stops: a newer version never blanks the view or cuts a recording off.
   _detail(story) {
     const source = this._source;
     if (story.kind !== "guard" || typeof source?.detail !== "function") return null;
@@ -829,15 +886,25 @@ class HsWeek extends HsElement {
       this._detailSource = source;
       this._details = new Map();
       this._drafts = new Map();
+      this._current = new Map();
     }
     const key = pictureKey(story);
     let entry = this._details.get(key);
     if (!entry) {
-      entry = { block: null, failed: false, retried: false };
+      entry = { block: null, loaded: false, failed: false, retried: false };
       this._details.set(key, entry);
       this._fetchDetail(source, story, key, entry);
     }
-    return entry.block;
+    const shown = this._current.get(story.id) ?? null;
+    if (entry.loaded && entry.block !== shown && !shown?.active?.()) {
+      if (entry.block) {
+        entry.block.onSettle = () => this._draw();
+        this._current.set(story.id, entry.block);
+      } else {
+        this._current.delete(story.id);
+      }
+    }
+    return this._current.get(story.id) ?? null;
   }
   // True once it has an answer (even none), false when the request failed.
   _fetchDetail(source, story, key, entry) {
@@ -848,9 +915,11 @@ class HsWeek extends HsElement {
         (data) => {
           if (this._details.get(key) !== entry) return true;
           const before = entry.block;
-          entry.block = detailBlock(source, story, data, () => this._fetchDetail(source, story, key, entry), this._draftsFor(story.id));
+          const shown = this._current.get(story.id);
+          entry.block = detailBlock(source, story, data, () => this._fetchDetail(source, story, key, entry), this._draftsFor(story.id), shown?.state);
+          entry.loaded = true;
           // Never paint over "can't reach": the answer is kept for when it is back.
-          if ((entry.block || before) && !this._offline()) this._draw();
+          if ((entry.block || before || shown) && !this._offline()) this._draw();
           this._wantFocus = null; // the request was for this rebuild, now done
           return true;
         },
@@ -870,6 +939,7 @@ class HsWeek extends HsElement {
   }
   _toggle(story, wasOpen) {
     this._open = wasOpen ? null : story.id;
+    if (wasOpen) this._current.get(story.id)?.pause?.(); // a closed row plays nothing
     if (!wasOpen) this._reopened(story);
     this._draw();
   }
@@ -945,6 +1015,7 @@ class HsWeek extends HsElement {
     for (const key of this._details.keys()) if (!listed.has(key)) this._details.delete(key);
     const ids = new Set(stories.map((story) => story.id));
     for (const id of this._drafts.keys()) if (!ids.has(id)) this._drafts.delete(id);
+    for (const id of this._current.keys()) if (!ids.has(id)) this._current.delete(id);
     this._paint(
       el(
         "div",
