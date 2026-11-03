@@ -25,8 +25,11 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.util import slugify
 
-from .api import EngineError
+from .api import EngineConflict, EngineError
 from .const import (
+    CARD_ACTION_ID_RE,
+    CARD_ACTION_PREFIX,
+    CARD_ACTION_TITLE_MAX,
     CONF_PHONES,
     CONF_SCRIPT,
     CONF_SCRIPT_SOURCE,
@@ -35,6 +38,7 @@ from .const import (
     DEFAULT_SCRIPT_SOURCE,
     DOMAIN,
     FINE_ACTION_PREFIX,
+    LEARN_TEXT_MAX,
     NAME,
     NOTIFY_GROUP,
     NOTIFY_TAG_PREFIX,
@@ -65,6 +69,8 @@ PROTECT_DOMAIN = "unifiprotect"
 CAMERA_ID_RE = re.compile(r"\A[A-Za-z0-9]{1,64}\Z")
 # The unifiprotect integration's package camera is its channel 3 (unique id `<mac>_3`).
 PROTECT_PACKAGE_CHANNEL = "3"
+# Android shows at most three buttons on a notification.
+ANDROID_MAX_ACTIONS = 3
 
 
 class Loudness(StrEnum):
@@ -220,8 +226,55 @@ def _find_camera_entity(hass: HomeAssistant, camera_id: Any) -> str | None:
     return min(candidates)[1] if candidates else None
 
 
-def _alert_payload(hass: HomeAssistant, card: dict[str, Any]) -> dict[str, Any]:
-    """What every route (phone or script) carries: the signed picture and the button."""
+def _card_actions(card: dict[str, Any], android: bool) -> list[dict[str, Any]]:
+    """The notification's buttons: the card's own when it names some, else That's fine.
+
+    The engine's list comes over the network, so whatever isn't well-formed is dropped. A
+    text button carries iOS's labels unless the phone is known to be Android (the script's
+    phones aren't known, and Android ignores them).
+    """
+    story = card["story"]
+    offered = card.get("actions")
+    if not isinstance(offered, list):
+        return [{"action": f"{FINE_ACTION_PREFIX}{story}", "title": FINE_TITLE}]
+    actions: list[dict[str, Any]] = []
+    for item in offered:
+        if not isinstance(item, dict):
+            continue
+        action_id, title = item.get("id"), item.get("title")
+        if not isinstance(action_id, str) or not CARD_ACTION_ID_RE.match(action_id):
+            continue
+        if not isinstance(title, str) or not 0 < len(title) <= CARD_ACTION_TITLE_MAX:
+            continue
+        action = {"action": f"{CARD_ACTION_PREFIX}{story}::{action_id}", "title": title}
+        if item.get("text_input") is True:
+            action["behavior"] = "textInput"
+            if not android:
+                action["textInputButtonTitle"] = "Keep"
+                action["textInputPlaceholder"] = "What should the guard know?"
+        actions.append(action)
+    # An empty list means no buttons; a list with nothing usable is as if there were none.
+    if offered and not actions:
+        return [{"action": f"{FINE_ACTION_PREFIX}{story}", "title": FINE_TITLE}]
+    return actions
+
+
+def _fit_android(actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Android shows three buttons: the text ones stay, the earlier others fill the rest."""
+    if len(actions) <= ANDROID_MAX_ACTIONS:
+        return actions
+    text = [i for i, a in enumerate(actions) if a.get("behavior") == "textInput"]
+    kept = text[:ANDROID_MAX_ACTIONS]
+    others = (i for i in range(len(actions)) if i not in kept)
+    while len(kept) < ANDROID_MAX_ACTIONS:
+        kept.append(next(others))
+    return [actions[i] for i in sorted(kept)]
+
+
+def _alert_payload(
+    hass: HomeAssistant, card: dict[str, Any], android: bool = False
+) -> dict[str, Any]:
+    """What every route (phone or script) carries: the signed picture and the buttons."""
     story = card["story"]
     if card.get("level") == "safety":
         return {}
@@ -234,7 +287,7 @@ def _alert_payload(hass: HomeAssistant, card: dict[str, Any]) -> dict[str, Any]:
             IMAGE_LIFETIME,
             use_content_user=True,
         ),
-        "actions": [{"action": f"{FINE_ACTION_PREFIX}{story}", "title": FINE_TITLE}],
+        "actions": _card_actions(card, android),
     }
 
 
@@ -246,9 +299,12 @@ def build_notification(hass: HomeAssistant, service: str, card: dict[str, Any]) 
     link = f"{PANEL_URL_PATH_PREFIX}?story={story}"
 
     data: dict[str, Any] = {"tag": f"{NOTIFY_TAG_PREFIX}{story}", "group": NOTIFY_GROUP}
-    data.update(_alert_payload(hass, card))
+    android = _is_android(hass, service)
+    data.update(_alert_payload(hass, card, android))
+    if android and "actions" in data:
+        data["actions"] = _fit_android(data["actions"])
 
-    if _is_android(hass, service):
+    if android:
         data["clickAction"] = link
         data.update(ANDROID_CHANNELS[loud])
     else:
@@ -417,6 +473,21 @@ async def _async_take(hass: HomeAssistant, entry: HomeSecurityConfigEntry, body:
         return HTTPStatus.INTERNAL_SERVER_ERROR
 
 
+async def _async_card_action(entry: HomeSecurityConfigEntry, action: str, reply_text: Any) -> None:
+    """A tap on one of a card's own buttons (`HS_ACT::<story>::<id>`), with any typed words."""
+    story, separator, choice = action.removeprefix(CARD_ACTION_PREFIX).partition("::")
+    if not separator or not STORY_ID_RE.match(story) or not CARD_ACTION_ID_RE.match(choice):
+        return
+    text = reply_text.strip()[:LEARN_TEXT_MAX] if isinstance(reply_text, str) else ""
+    try:
+        await entry.runtime_data.client.async_learn(story, choice, text or None)
+    except EngineConflict as err:
+        # Already answered, or not taking answers now: nothing for anyone to do.
+        _LOGGER.debug("The engine didn't take a tap on story %s: %s", story, err)
+    except EngineError as err:
+        _LOGGER.warning("Couldn't pass a tap on story %s to the engine: %s", story, err)
+
+
 def async_setup_alerts(hass: HomeAssistant, entry: HomeSecurityConfigEntry) -> None:
     """Register the webhook and the That's fine action; both go when the entry unloads."""
     webhook_id = entry.data[CONF_WEBHOOK_ID]
@@ -448,7 +519,12 @@ def async_setup_alerts(hass: HomeAssistant, entry: HomeSecurityConfigEntry) -> N
 
     async def on_action(event: Event) -> None:
         action = event.data.get("action")
-        if not isinstance(action, str) or not action.startswith(FINE_ACTION_PREFIX):
+        if not isinstance(action, str):
+            return
+        if action.startswith(CARD_ACTION_PREFIX):
+            await _async_card_action(entry, action, event.data.get("reply_text"))
+            return
+        if not action.startswith(FINE_ACTION_PREFIX):
             return
         story = action.removeprefix(FINE_ACTION_PREFIX)
         if not STORY_ID_RE.match(story):

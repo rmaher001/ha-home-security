@@ -84,6 +84,22 @@ sends nothing. If the socket drops, reconnect with backoff.
 
 `POST /api/v1/stories/{id}/fine`: "That's fine". `200 {"result": "ok"}`, or `404`.
 
+`POST /api/v1/stories/{id}/learn` `{"choice": "keep", "text": "..."}`: the answer to the guard's
+offer to learn from a "That's fine". `choice` is one of `learn`, `no`, `1`, `2`, `3`, `none`,
+`write` or `keep`; `text` is the note in the owner's words (`write`, `keep`) or `null`. The
+integration passes at most 500 characters. Answers:
+
+- `200 {"result": "kept"}`, `{"result": "declined"}` or `{"result": "ok"}`;
+- `202 {"result": "drafting"}`: the notes are being drafted;
+- `400 {"error": "..."}`: the answer was refused (for example a note that is too long);
+- `404`: no such story;
+- `409 {"error": "..."}`: the engine isn't taking that answer now (for example it was
+  already given).
+
+On a `400` or `409` the integration passes the `error` text on to the person (cut at 200
+characters), for example "The guard already has 20 notes; remove one on the setup page
+first".
+
 ## Controls
 
 `PUT /api/v1/mode` `{"mode": "away"}`: `auto`, `home`, `night` or `away`; anything else `400`.
@@ -141,7 +157,10 @@ and `Authorization: Bearer <paired key>` counts as signed in. `?story=<id>` open
     api/v1/stories/<id>/fine`; `PUT api/v1/mode`, `api/v1/alerts`; `GET api/v1/ws` as a
     websocket.
   - administrators only (`403` for anyone else): `GET`/`POST page/setup`, `POST page/restore`,
-    `POST page/pair`.
+    `POST page/pair`, `POST api/v1/stories/<id>/learn` (a kept note changes what the guard
+    reads at every look), and the setup page's notes for the guard: `GET api/v1/guard/notes`,
+    `POST api/v1/guard/notes/<id>`, `POST api/v1/guard/notes/<id>/remove` and `/restore` (a
+    note id is 12 lowercase hex characters).
   - never: `api/v1/pair`, `api/v1/sensors`, the password and sign-in pages, and the rest.
 - Allowed requests go to `<engine>/<path>`, with the query string. Home Assistant adds the key
   to the request. It never forwards the browser's cookies or `Authorization` header, drops
@@ -180,6 +199,16 @@ replaces the earlier one on the phone.
   takes the story's earlier phone alert away, so none is left showing stale news.
 - `alert: false`: update quietly (no sound), never interrupt.
 - `level: "safety"` (smoke, CO, leak) and `level: "high"` with `alert: true`: urgent.
+- `actions` (optional, any kind): the notification's buttons, `[{"id": "learn", "title":
+  "Learn from this"}, {"id": "keep", "title": "Keep", "text_input": true}]`. When the key is
+  present the buttons are exactly these, in place of That's fine (an empty list: none); a tap
+  comes back as `POST /api/v1/stories/{id}/learn` with the button's `id` as `choice`. An `id` is
+  one to sixteen of `a-z0-9`, a `title` one to 40 characters; a bad entry is dropped, and a
+  list with nothing usable is as if the key were absent. A `text_input` button asks for text
+  on the phone, and what is typed goes along as `text` (trimmed, at most 500 characters).
+  Android shows three buttons: past three, the `text_input` ones stay and the earlier others
+  fill the rest, in order (the script gets them all). Without the key, That's fine is the one
+  button.
 - `snapshot` and `reply` are the engine's own addresses: the integration uses the picture and
   "That's fine" routes above instead.
 
@@ -209,11 +238,11 @@ It carries one more field:
   the variables `source` (the option's source string, default `security.guard.alert`),
   `title`, `message`, `image` (signed picture path), `click_action` (panel link
   `/home-security?story=<id>`), `tag` (same story, same tag: a later card replaces the
-  earlier one), `actions` (the That's fine action) and `camera` (the camera entity id; absent
-  when unresolved). Every other kind of card goes straight to the phones, as does a guard
-  card when no script is set, and a guard card with `alert: false` (a quiet re-send): the
-  script's source would give it the hub's level and it would buzz as if new, so it goes to the
-  phones as passive.
+  earlier one), `actions` (the card's buttons, as above; That's fine by default) and `camera`
+  (the camera entity id; absent when unresolved). Every other kind of card goes straight to
+  the phones, as does a guard card when no script is set, and a guard card with `alert: false`
+  (a quiet re-send): the script's source would give it the hub's level and it would buzz as if
+  new, so it goes to the phones as passive.
   - What the integration detects: before calling, it checks the script entity exists and is not
     `unavailable` (Home Assistant's own `script.turn_on` only logs for an unknown entity and
     returns normally, which would lose the alert). If it is missing or unavailable, it logs a

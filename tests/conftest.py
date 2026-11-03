@@ -57,6 +57,9 @@ STORY = {
 }
 
 
+REFUSAL = "The guard already has 20 notes; remove one on the setup page first"
+
+
 class FakeEngine:
     """A tiny in-process stand-in for the engine's LAN API."""
 
@@ -104,6 +107,7 @@ class FakeEngine:
         app.router.add_get("/api/v1/stories", self._stories)
         app.router.add_get("/api/v1/stories/{id}/picture.jpg", self._picture)
         app.router.add_post("/api/v1/stories/{id}/fine", self._fine)
+        app.router.add_post("/api/v1/stories/{id}/learn", self._learn)
         app.router.add_post("/api/v1/sensors", self._sensors)
         app.router.add_get("/", self._root)
         app.router.add_get("/page/home-security-cards-slow.js", self._slow)
@@ -183,6 +187,24 @@ class FakeEngine:
             return self._refuse()
         story_id = request.match_info["id"]
         self.calls.append(("POST", "fine", story_id))
+        if story_id != STORY["id"]:
+            return web.json_response({"error": "not found"}, status=404)
+        return web.json_response({"result": "ok"})
+
+    async def _learn(self, request: web.Request) -> web.Response:
+        if not self._authorized(request):
+            return self._refuse()
+        story_id = request.match_info["id"]
+        body = await request.json()
+        self.calls.append(("POST", "learn", (story_id, body)))
+        if story_id == "01JBCONFLICT":
+            return web.json_response({"error": "not now"}, status=409)
+        if story_id == "01JBREFUSED":
+            return web.json_response({"error": REFUSAL}, status=400)
+        if story_id == "01JBPLAIN":
+            return web.Response(text="nope", status=400)
+        if story_id == "01JBODD":
+            return web.json_response({"error": 5}, status=409)
         if story_id != STORY["id"]:
             return web.json_response({"error": "not found"}, status=404)
         return web.json_response({"result": "ok"})

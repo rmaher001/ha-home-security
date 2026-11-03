@@ -46,6 +46,11 @@ FRONTEND_URL_BASE: Final = "/home_security_frontend"
 CARDS_FILE: Final = "home-security-cards.js"
 
 FINE_ACTION_PREFIX: Final = "HS_FINE::"
+# A card's own buttons come back as `HS_ACT::<story>::<id>`.
+CARD_ACTION_PREFIX: Final = "HS_ACT::"
+CARD_ACTION_ID_RE: Final = re.compile(r"\A[a-z0-9]{1,16}\Z")
+CARD_ACTION_TITLE_MAX: Final = 40
+LEARN_TEXT_MAX: Final = 500
 NOTIFY_TAG_PREFIX: Final = "hs-"
 NOTIFY_GROUP: Final = "home-security"
 

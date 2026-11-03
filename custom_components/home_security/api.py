@@ -36,15 +36,37 @@ class EngineNotFound(EngineError):
     """The engine has no such story or picture (404)."""
 
 
-def _raise_for_status(status: int) -> None:
+class EngineConflict(EngineError):
+    """The engine isn't taking that now, for example an answer already given (409)."""
+
+
+REASON_MAX = 200
+
+
+def _raise_for_status(status: int, reason: str | None = None) -> None:
+    """Raise for an error status; `reason` is the engine's own words for a 400 or 409."""
     if status == 401:
         raise EngineAuthError("the engine refused the token")
     if status == 403:
         raise EngineCodeRefused("the pairing code was refused")
     if status == 404:
         raise EngineNotFound("not found")
+    if status == 409:
+        raise EngineConflict(reason or "the engine isn't taking that now")
     if status >= 400:
-        raise EngineError(f"the engine answered {status}")
+        raise EngineError(reason or f"the engine answered {status}")
+
+
+async def _async_reason(resp: aiohttp.ClientResponse) -> str | None:
+    """The engine's `error` text on a 400 or 409, when it gave one (for the person to read)."""
+    if resp.status not in (400, 409):
+        return None
+    try:
+        body = await resp.json(content_type=None)
+    except aiohttp.ClientError, ValueError:
+        return None
+    reason = body.get("error") if isinstance(body, dict) else None
+    return reason.strip()[:REASON_MAX] or None if isinstance(reason, str) else None
 
 
 async def async_pair(
@@ -96,7 +118,7 @@ class EngineClient:
             async with self._session.request(
                 method, f"{self.url}{path}", headers=self.headers, timeout=TIMEOUT, **kwargs
             ) as resp:
-                _raise_for_status(resp.status)
+                _raise_for_status(resp.status, await _async_reason(resp))
                 return await resp.json()
         except (aiohttp.ClientError, TimeoutError) as err:
             raise EngineConnectionError(str(err)) from err
@@ -115,6 +137,12 @@ class EngineClient:
 
     async def async_mark_fine(self, story_id: str) -> None:
         await self._request("POST", f"/api/v1/stories/{story_id}/fine")
+
+    async def async_learn(self, story_id: str, choice: str, text: str | None) -> None:
+        """Answer the guard's offer to learn from a story: a choice, and maybe the owner's words."""
+        await self._request(
+            "POST", f"/api/v1/stories/{story_id}/learn", json={"choice": choice, "text": text}
+        )
 
     async def async_post_sensors(self, *, snapshot: bool, states: list[dict[str, Any]]) -> None:
         """Tell the engine about the house's doors, locks and people (it answers 204)."""

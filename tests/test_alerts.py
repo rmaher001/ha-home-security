@@ -8,7 +8,7 @@ import hmac
 import json
 import time
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from homeassistant.core import HomeAssistant, ServiceCall
@@ -19,6 +19,8 @@ from homeassistant.setup import async_setup_component
 from pytest_homeassistant_custom_component.common import MockConfigEntry, async_capture_events
 from pytest_homeassistant_custom_component.typing import ClientSessionGenerator
 
+from custom_components.home_security.alerts import build_script_variables
+from custom_components.home_security.api import EngineClient
 from custom_components.home_security.const import CONF_PHONES, CONF_SCRIPT, CONF_SCRIPT_SOURCE
 
 from .conftest import STORY, WEBHOOK_ID, WEBHOOK_SECRET, FakeEngine, setup_integration, wait_for
@@ -1069,3 +1071,367 @@ async def test_a_slow_clear_does_not_hold_the_answer_beyond_the_slower_send(
     started = time.monotonic()
     assert await post(guard(joined=["01JBOLDER"])) == 200
     assert time.monotonic() - started < 0.7  # one wait of 0.4 s, not two
+
+
+# ---- Cards that carry their own actions (the guard learns from That's fine) ----
+
+
+def learn_card(actions: Any, **changes: Any) -> dict[str, Any]:
+    """What the engine sends to offer or confirm a lesson: quiet, and straight to the phones."""
+    return guard(actions=actions, alert=False, shadow=False, **changes)
+
+
+OFFER = [
+    {"id": "learn", "title": "Learn from this"},
+    {"id": "no", "title": "No"},
+]
+
+
+async def test_card_actions_replace_thats_fine(phones: Phones, post) -> None:
+    assert await post(learn_card(OFFER)) == 200
+    expected = [
+        {"action": f"HS_ACT::{STORY_ID}::learn", "title": "Learn from this"},
+        {"action": f"HS_ACT::{STORY_ID}::no", "title": "No"},
+    ]
+    assert phones.to(IPHONE)[0]["data"]["actions"] == expected
+    assert phones.to(ANDROID)[0]["data"]["actions"] == expected
+
+
+async def test_card_without_actions_key_keeps_thats_fine(phones: Phones, post) -> None:
+    assert await post(guard()) == 200
+    assert phones.to(IPHONE)[0]["data"]["actions"] == [
+        {"action": f"HS_FINE::{STORY_ID}", "title": "That's fine"}
+    ]
+
+
+async def test_card_with_an_empty_actions_list_has_none(phones: Phones, post) -> None:
+    assert await post(learn_card([])) == 200
+    assert phones.to(IPHONE)[0]["data"]["actions"] == []
+    assert phones.to(ANDROID)[0]["data"]["actions"] == []
+
+
+async def test_actions_apply_to_any_kind(phones: Phones, post) -> None:
+    assert await post(card(actions=[{"id": "ok", "title": "Okay"}])) == 200
+    assert phones.to(IPHONE)[0]["data"]["actions"] == [
+        {"action": f"HS_ACT::{STORY_ID}::ok", "title": "Okay"}
+    ]
+
+
+async def test_text_input_action_ios(phones: Phones, post) -> None:
+    actions = [{"id": "keep", "title": "Keep", "text_input": True}, {"id": "no", "title": "No"}]
+    assert await post(learn_card(actions)) == 200
+    assert phones.to(IPHONE)[0]["data"]["actions"] == [
+        {
+            "action": f"HS_ACT::{STORY_ID}::keep",
+            "title": "Keep",
+            "behavior": "textInput",
+            "textInputButtonTitle": "Keep",
+            "textInputPlaceholder": "What should the guard know?",
+        },
+        {"action": f"HS_ACT::{STORY_ID}::no", "title": "No"},
+    ]
+
+
+async def test_text_input_action_android(phones: Phones, post) -> None:
+    assert await post(learn_card([{"id": "keep", "title": "Keep", "text_input": True}])) == 200
+    # Android's reply box needs no iOS labels.
+    assert phones.to(ANDROID)[0]["data"]["actions"] == [
+        {"action": f"HS_ACT::{STORY_ID}::keep", "title": "Keep", "behavior": "textInput"}
+    ]
+
+
+async def test_text_input_must_be_true_not_just_truthy(phones: Phones, post) -> None:
+    actions = [
+        {"id": "a", "title": "A", "text_input": "yes"},
+        {"id": "b", "title": "B", "text_input": False},
+    ]
+    assert await post(learn_card(actions)) == 200
+    assert all("behavior" not in a for a in phones.to(IPHONE)[0]["data"]["actions"])
+
+
+async def test_bad_actions_are_dropped(phones: Phones, post) -> None:
+    actions = [
+        {"id": "good", "title": "Good"},
+        {"id": "UPPER", "title": "Upper id"},
+        {"id": "has-dash", "title": "Dash id"},
+        {"id": "a" * 17, "title": "Long id"},
+        {"id": "", "title": "Empty id"},
+        {"id": "a::b", "title": "Separator id"},
+        {"id": "ok1\n", "title": "Newline id"},
+        {"id": 7, "title": "Number id"},
+        {"id": "notitle", "title": ""},
+        {"id": "longtitle", "title": "x" * 41},
+        {"id": "numtitle", "title": 5},
+        {"id": "missing"},
+        {"title": "No id"},
+        "not a dict",
+        None,
+        {"id": "edge", "title": "x" * 40},
+    ]
+    assert await post(learn_card(actions)) == 200
+    assert phones.to(IPHONE)[0]["data"]["actions"] == [
+        {"action": f"HS_ACT::{STORY_ID}::good", "title": "Good"},
+        {"action": f"HS_ACT::{STORY_ID}::edge", "title": "x" * 40},
+    ]
+
+
+async def test_a_list_of_only_bad_actions_falls_back_to_thats_fine(phones: Phones, post) -> None:
+    bad = [{"id": "UPPER", "title": "A"}, {"id": "ok", "title": ""}, "x", None]
+    assert await post(learn_card(bad)) == 200
+    assert phones.to(IPHONE)[0]["data"]["actions"] == [
+        {"action": f"HS_FINE::{STORY_ID}", "title": "That's fine"}
+    ]
+    # Only an empty list means no buttons.
+    phones.calls.clear()
+    assert await post(learn_card([])) == 200
+    assert phones.to(IPHONE)[0]["data"]["actions"] == []
+
+
+async def test_actions_that_are_not_a_list_fall_back_to_thats_fine(phones: Phones, post) -> None:
+    for bad in ("learn", {"id": "a", "title": "A"}, 5, None):
+        phones.calls.clear()
+        assert await post(learn_card(bad)) == 200
+        assert phones.to(IPHONE)[0]["data"]["actions"] == [
+            {"action": f"HS_FINE::{STORY_ID}", "title": "That's fine"}
+        ], bad
+
+
+async def test_actions_on_a_safety_card_are_left_off(phones: Phones, post) -> None:
+    """A safety card never carries buttons or a picture, whatever the engine puts on it."""
+    assert await post(card(level="safety", actions=OFFER)) == 200
+    data = phones.to(IPHONE)[0]["data"]
+    assert "actions" not in data
+    assert "image" not in data
+
+
+async def test_learn_card_goes_straight_to_the_phones_quietly_with_the_script_set(
+    hass: HomeAssistant, config_entry: MockConfigEntry, phones: Phones, post
+) -> None:
+    script = use_script(hass, config_entry)
+    assert await post(learn_card(OFFER)) == 200
+    # Not through the hub: it is no alert, so only the story's own card is replaced.
+    assert script.calls == []
+    ios = phones.to(IPHONE)[0]["data"]
+    assert ios["tag"] == f"hs-{STORY_ID}"
+    assert ios["push"] == {"interruption-level": "passive"}
+    android = phones.to(ANDROID)[0]["data"]
+    assert android["tag"] == f"hs-{STORY_ID}"
+    assert android["channel"] == "Home security updates"
+    assert android["importance"] == "low"
+
+
+async def test_learn_card_replaces_the_earlier_card_by_tag(phones: Phones, post) -> None:
+    assert await post(guard()) == 200
+    assert await post(learn_card(OFFER, event="updated")) == 200
+    sent = phones.to(IPHONE)
+    assert sent[0]["data"]["tag"] == sent[1]["data"]["tag"] == f"hs-{STORY_ID}"
+    # Nothing is cleared: the second card takes the first one's place on the phone.
+    assert all(c[1].get("message") != "clear_notification" for c in phones.calls)
+
+
+async def test_actions_through_the_script(
+    hass: HomeAssistant, config_entry: MockConfigEntry, phones: Phones, post
+) -> None:
+    script = use_script(hass, config_entry)
+    actions = [{"id": "keep", "title": "Keep", "text_input": True}, {"id": "no", "title": "No"}]
+    # An alerting card with its own actions reaches the hub with them. The hub's phones
+    # aren't known here, so the text button carries iOS's labels (Android ignores them).
+    assert await post(guard(actions=actions)) == 200
+    assert script.calls[0]["variables"]["actions"] == [
+        {
+            "action": f"HS_ACT::{STORY_ID}::keep",
+            "title": "Keep",
+            "behavior": "textInput",
+            "textInputButtonTitle": "Keep",
+            "textInputPlaceholder": "What should the guard know?",
+        },
+        {"action": f"HS_ACT::{STORY_ID}::no", "title": "No"},
+    ]
+
+
+async def test_script_variables_follow_the_same_rules(
+    hass: HomeAssistant, engine: FakeEngine, phones: Phones, config_entry: MockConfigEntry
+) -> None:
+    entry = config_entry
+    both = build_script_variables(
+        hass, entry, guard(actions=[{"id": "x", "title": "X"}, {"id": "BAD", "title": "Y"}])
+    )
+    assert both["actions"] == [{"action": f"HS_ACT::{STORY_ID}::x", "title": "X"}]
+    assert build_script_variables(hass, entry, guard(actions=[]))["actions"] == []
+    assert build_script_variables(hass, entry, guard())["actions"] == [
+        {"action": f"HS_FINE::{STORY_ID}", "title": "That's fine"}
+    ]
+
+
+def fire_action(hass: HomeAssistant, action: str, **data: Any) -> None:
+    hass.bus.async_fire("mobile_app_notification_action", {"action": action, **data})
+
+
+def learn_calls(engine: FakeEngine) -> list[Any]:
+    return [c[2] for c in engine.calls if c[1] == "learn"]
+
+
+async def test_tap_on_an_action_tells_the_engine(
+    hass: HomeAssistant, engine: FakeEngine, phones: Phones
+) -> None:
+    fire_action(hass, f"HS_ACT::{STORY_ID}::learn")
+    await wait_for(lambda: learn_calls(engine))
+    assert learn_calls(engine) == [(STORY_ID, {"choice": "learn", "text": None})]
+
+
+async def test_tap_with_typed_text_sends_it_trimmed(
+    hass: HomeAssistant, engine: FakeEngine, phones: Phones
+) -> None:
+    fire_action(hass, f"HS_ACT::{STORY_ID}::keep", reply_text="  the courier is expected  \n")
+    await wait_for(lambda: learn_calls(engine))
+    assert learn_calls(engine) == [
+        (STORY_ID, {"choice": "keep", "text": "the courier is expected"})
+    ]
+
+
+async def test_typed_text_is_capped_at_500_characters(
+    hass: HomeAssistant, engine: FakeEngine, phones: Phones
+) -> None:
+    fire_action(hass, f"HS_ACT::{STORY_ID}::keep", reply_text="x" * 900)
+    await wait_for(lambda: learn_calls(engine))
+    [(_, body)] = learn_calls(engine)
+    assert body["text"] == "x" * 500
+
+
+@pytest.mark.parametrize("reply", [None, "", "   \n", 5, ["a"], {"a": 1}])
+async def test_empty_or_odd_reply_text_is_none(
+    hass: HomeAssistant, engine: FakeEngine, phones: Phones, reply: Any
+) -> None:
+    fire_action(hass, f"HS_ACT::{STORY_ID}::keep", reply_text=reply)
+    await wait_for(lambda: learn_calls(engine))
+    assert learn_calls(engine) == [(STORY_ID, {"choice": "keep", "text": None})]
+
+
+async def test_malformed_actions_are_ignored(
+    hass: HomeAssistant, engine: FakeEngine, phones: Phones
+) -> None:
+    for bad in (
+        "HS_ACT::../x::learn",
+        f"HS_ACT::{STORY_ID}::UPPER",
+        f"HS_ACT::{STORY_ID}::{'a' * 17}",
+        f"HS_ACT::{STORY_ID}::",
+        f"HS_ACT::{STORY_ID}",
+        f"HS_ACT::{STORY_ID}::learn\n",
+        f"HS_ACT::{STORY_ID}::learn::extra",
+        "HS_ACT::::learn",
+        "HS_ACT",
+    ):
+        fire_action(hass, bad)
+    fire_action(hass, 5)
+    await hass.async_block_till_done()
+    assert learn_calls(engine) == []
+    assert [c for c in engine.calls if c[1] == "fine"] == []
+
+
+async def test_learn_tap_does_not_mark_fine(
+    hass: HomeAssistant, engine: FakeEngine, phones: Phones
+) -> None:
+    fire_action(hass, f"HS_ACT::{STORY_ID}::no")
+    await wait_for(lambda: learn_calls(engine))
+    assert [c for c in engine.calls if c[1] == "fine"] == []
+
+
+async def test_engine_error_on_a_tap_is_a_warning(
+    hass: HomeAssistant, engine: FakeEngine, phones: Phones, caplog: pytest.LogCaptureFixture
+) -> None:
+    fire_action(hass, "HS_ACT::01JBNOSUCH::learn")
+    await wait_for(lambda: learn_calls(engine))
+    await hass.async_block_till_done()
+    assert "Couldn't pass a tap on story 01JBNOSUCH to the engine" in caplog.text
+    assert any(r.levelname == "WARNING" for r in caplog.records if "01JBNOSUCH" in r.getMessage())
+
+
+async def test_a_tap_with_a_bad_story_id_never_reaches_the_engine_client(
+    hass: HomeAssistant, engine: FakeEngine, phones: Phones
+) -> None:
+    """The story id goes into a URL, so it is checked before the client is asked at all."""
+    with patch.object(EngineClient, "async_learn", new=AsyncMock()) as learn:
+        for bad in (
+            "HS_ACT::../x::learn",
+            "HS_ACT::a/b?x=1::learn",
+            "HS_ACT::::learn",
+            f"HS_ACT::{STORY_ID}\n::learn",
+            "HS_ACT::a b::learn",
+        ):
+            fire_action(hass, bad)
+        await hass.async_block_till_done()
+        learn.assert_not_called()
+        fire_action(hass, f"HS_ACT::{STORY_ID}::learn")
+        await hass.async_block_till_done()
+        learn.assert_awaited_once_with(STORY_ID, "learn", None)
+
+
+async def test_a_refused_tap_is_only_a_debug_line(
+    hass: HomeAssistant,
+    engine: FakeEngine,
+    phones: Phones,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """409: the engine isn't taking that answer now (already answered); nothing to worry about."""
+    caplog.set_level("DEBUG")
+    fire_action(hass, "HS_ACT::01JBCONFLICT::keep", reply_text="a note")
+    await wait_for(lambda: learn_calls(engine))
+    await hass.async_block_till_done()
+    ours = [r for r in caplog.records if r.name.startswith("custom_components.home_security")]
+    assert any("01JBCONFLICT" in r.getMessage() for r in ours)
+    assert "01JBCONFLICT" not in "".join(r.getMessage() for r in ours if r.levelname != "DEBUG")
+
+
+ANDROID_MANY = [
+    {"id": "a", "title": "A"},
+    {"id": "b", "title": "B"},
+    {"id": "c", "title": "C"},
+    {"id": "d", "title": "D"},
+]
+
+
+def ids(actions: list[dict[str, Any]]) -> list[str]:
+    return [a["action"].rpartition("::")[2] for a in actions]
+
+
+async def test_android_shows_three_actions_and_keeps_the_text_one(phones: Phones, post) -> None:
+    """Android shows three notification buttons; the one that takes text must be among them."""
+    many = [*ANDROID_MANY, {"id": "keep", "title": "Keep", "text_input": True}]
+    assert await post(learn_card(many)) == 200
+    assert ids(phones.to(ANDROID)[0]["data"]["actions"]) == ["a", "b", "keep"]
+    # iOS has room for them all.
+    assert ids(phones.to(IPHONE)[0]["data"]["actions"]) == ["a", "b", "c", "d", "keep"]
+
+
+async def test_android_keeps_the_order_and_the_text_action_wherever_it_is(
+    phones: Phones, post
+) -> None:
+    middle = [ANDROID_MANY[0], {"id": "k", "title": "K", "text_input": True}, *ANDROID_MANY[1:]]
+    assert await post(learn_card(middle)) == 200
+    assert ids(phones.to(ANDROID)[0]["data"]["actions"]) == ["a", "k", "b"]
+
+
+async def test_android_with_several_text_actions_keeps_them_first(phones: Phones, post) -> None:
+    many = [
+        {"id": "a", "title": "A"},
+        {"id": "k1", "title": "K1", "text_input": True},
+        {"id": "b", "title": "B"},
+        {"id": "k2", "title": "K2", "text_input": True},
+    ]
+    assert await post(learn_card(many)) == 200
+    assert ids(phones.to(ANDROID)[0]["data"]["actions"]) == ["a", "k1", "k2"]
+
+
+async def test_android_with_three_or_fewer_actions_is_unchanged(phones: Phones, post) -> None:
+    three = [*ANDROID_MANY[:2], {"id": "k", "title": "K", "text_input": True}]
+    assert await post(learn_card(three)) == 200
+    assert ids(phones.to(ANDROID)[0]["data"]["actions"]) == ["a", "b", "k"]
+
+
+async def test_the_script_route_is_not_cut_to_three(
+    hass: HomeAssistant, config_entry: MockConfigEntry, phones: Phones, post
+) -> None:
+    script = use_script(hass, config_entry)
+    many = [*ANDROID_MANY, {"id": "keep", "title": "Keep", "text_input": True}]
+    assert await post(guard(actions=many)) == 200
+    assert ids(script.calls[0]["variables"]["actions"]) == ["a", "b", "c", "d", "keep"]

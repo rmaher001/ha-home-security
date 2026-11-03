@@ -13,10 +13,20 @@ from homeassistant.helpers.dispatcher import async_dispatcher_connect
 
 from .api import EngineError, EngineNotFound
 from .app_proxy import async_get_app_access
-from .const import APP_TICKET_SECONDS, MODES, PICTURE_URL, SIGNAL_UPDATE, STORY_DAYS, STORY_ID_RE
+from .const import (
+    APP_TICKET_SECONDS,
+    CARD_ACTION_ID_RE,
+    LEARN_TEXT_MAX,
+    MODES,
+    PICTURE_URL,
+    SIGNAL_UPDATE,
+    STORY_DAYS,
+    STORY_ID_RE,
+)
 from .coordinator import HomeSecurityCoordinator, async_get_coordinator
 
 STORY_ID = vol.All(str, vol.Match(STORY_ID_RE))
+LEARN_CHOICE = vol.All(str, vol.Match(CARD_ACTION_ID_RE))
 PICTURE_URL_LIFETIME = timedelta(hours=1)
 
 
@@ -26,6 +36,7 @@ def async_register_commands(hass: HomeAssistant) -> None:
         ws_state,
         ws_stories,
         ws_mark_fine,
+        ws_learn,
         ws_set_mode,
         ws_subscribe,
         ws_picture_url,
@@ -94,6 +105,33 @@ async def ws_mark_fine(
         return
     try:
         await coordinator.client.async_mark_fine(msg["story_id"])
+    except EngineError as err:
+        _send_engine_error(connection, msg, err)
+        return
+    connection.send_result(msg["id"])
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "home_security/learn",
+        vol.Required("story_id"): STORY_ID,
+        vol.Required("choice"): LEARN_CHOICE,
+        vol.Optional("text"): vol.All(str, vol.Length(max=LEARN_TEXT_MAX)),
+    }
+)
+@websocket_api.async_response
+async def ws_learn(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Answer the guard's offer to learn from a story (what the notification buttons do).
+
+    Administrators only: a kept note changes what the guard reads at every look.
+    """
+    if not (coordinator := _coordinator(hass, connection, msg)):
+        return
+    try:
+        await coordinator.client.async_learn(msg["story_id"], msg["choice"], msg.get("text"))
     except EngineError as err:
         _send_engine_error(connection, msg, err)
         return

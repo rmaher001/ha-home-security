@@ -223,6 +223,7 @@ def async_get_app_access(hass: HomeAssistant) -> AppAccess:
 # What the engine's app may do through here, and nothing else. Matched on the decoded path,
 # case-sensitively and exactly (no trailing-slash variants).
 _ID = r"[A-Za-z0-9_-]{1,64}"
+_NOTE = r"[0-9a-f]{12}"
 _ROUTES: tuple[tuple[str, re.Pattern[str], str], ...] = tuple(
     (method, re.compile(pattern), kind)
     for method, pattern, kind in (
@@ -238,11 +239,17 @@ _ROUTES: tuple[tuple[str, re.Pattern[str], str], ...] = tuple(
         ("PUT", r"api/v1/mode", "open"),
         ("PUT", r"api/v1/alerts", "open"),
         ("GET", r"api/v1/ws", "open"),
-        # These change the engine's settings: administrators only.
+        # These change the engine's settings (or what the guard is told): administrators only.
         ("GET", r"page/setup", "admin"),
         ("POST", r"page/setup", "admin"),
         ("POST", r"page/restore", "admin"),
         ("POST", r"page/pair", "admin"),
+        # A kept note changes what the guard reads at every look.
+        ("POST", rf"api/v1/stories/{_ID}/learn", "admin"),
+        # The setup page's notes for the guard (note ids are 12 lowercase hex characters).
+        ("GET", r"api/v1/guard/notes", "admin"),
+        ("POST", rf"api/v1/guard/notes/{_NOTE}", "admin"),
+        ("POST", rf"api/v1/guard/notes/{_NOTE}/(?:remove|restore)", "admin"),
     )
 )
 # Encoded dots, slashes and backslashes (also encoded twice), and NUL: never in a path here.

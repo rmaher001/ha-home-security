@@ -812,3 +812,631 @@ test("closing a row does not retry a failed detail; only opening does", async ()
   await settle();
   assert.equal(calls, 2);
 });
+
+// ---- Learning from That's fine: the guard detail's learn section ----
+
+const NOTES = [
+  { text: "The small white dog Maple is walked past the patio at dusk.", alert: 0.21 },
+  { text: "Deliveries before noon are normal.", alert: 0.07 },
+];
+
+function withLearn(source, learn, { fail = false } = {}) {
+  source.learned = [];
+  source.learn = async (...args) => {
+    source.learned.push(args);
+    if (fail) throw new Error("nope");
+  };
+  let reply = { ...DETAIL, learn };
+  source.setLearn = (next) => (reply = { ...DETAIL, learn: next });
+  source.detailAsked = [];
+  source.detail = async (id) => {
+    source.detailAsked.push(id);
+    return reply;
+  };
+  source.stepPictureUrl = async (id, n) => `/step/${id}/${n}`;
+  return source;
+}
+
+async function openLearn(learn, options) {
+  const source = withLearn(fakeSource(), learn, options);
+  const week = mount("hs-week", source);
+  source.push([guardStory("gA")]);
+  await settle();
+  openFirst(week);
+  await settle();
+  await settle();
+  return { source, week };
+}
+
+const buttons = (week) => week.shadowRoot.querySelectorAll("button");
+const button = (week, label) => buttons(week).find((b) => b.textContent === label);
+const boxes = (week) => week.shadowRoot.querySelectorAll("textarea");
+
+test("an offer asks, with Learn from this and No", async () => {
+  const { source, week } = await openLearn({ state: "offered", notes: [], kept: null });
+  assert.ok(texts(week).includes("Should the guard learn from this?"));
+  button(week, "Learn from this").dispatch("click");
+  await settle();
+  assert.deepEqual(source.learned, [["gA", "learn"]]);
+  button(week, "No").dispatch("click");
+  await settle();
+  assert.deepEqual(source.learned[1], ["gA", "no"]);
+});
+
+test("the buttons are pills with room for a thumb", async () => {
+  const { week } = await openLearn({ state: "offered", notes: [], kept: null });
+  assert.equal(button(week, "Learn from this").getAttribute("class"), "pill");
+  assert.equal(button(week, "No").getAttribute("class"), "pill");
+});
+
+test("after a learn call the detail is fetched again and the new state shows", async () => {
+  const { source, week } = await openLearn({ state: "offered", notes: [], kept: null });
+  assert.deepEqual(source.detailAsked, ["gA"]);
+  source.setLearn({ state: "drafting", notes: [], kept: null });
+  button(week, "Learn from this").dispatch("click");
+  await settle();
+  await settle();
+  assert.deepEqual(source.detailAsked, ["gA", "gA"]);
+  assert.ok(texts(week).includes("Drafting notes..."));
+  assert.ok(!texts(week).includes("Should the guard learn from this?"));
+});
+
+test("while a learn call is out its buttons are off, so a double tap sends one", async () => {
+  const { source, week } = await openLearn({ state: "offered", notes: [], kept: null });
+  const learnButton = button(week, "Learn from this");
+  learnButton.dispatch("click");
+  assert.equal(Boolean(learnButton.disabled), true);
+  assert.equal(Boolean(button(week, "No").disabled), true);
+  await settle();
+  assert.equal(source.learned.length, 1);
+});
+
+test("a learn call that fails says so, turns the buttons back on and does not fetch again", async () => {
+  const { source, week } = await openLearn({ state: "offered", notes: [], kept: null }, { fail: true });
+  button(week, "No").dispatch("click");
+  await settle();
+  await settle();
+  assert.ok(texts(week).includes("Didn't go through: nope"));
+  assert.equal(Boolean(button(week, "No").disabled), false);
+  assert.equal(Boolean(button(week, "Learn from this").disabled), false);
+  assert.deepEqual(source.detailAsked, ["gA"]);
+});
+
+test("drafting says so", async () => {
+  const { week } = await openLearn({ state: "drafting", notes: [], kept: null });
+  assert.ok(texts(week).includes("Drafting notes..."));
+  assert.equal(buttons(week).filter((b) => b.textContent !== "That's fine").length, 0);
+});
+
+test("choosing shows each note in an edit box with its score", async () => {
+  const { week } = await openLearn({ state: "choosing", notes: NOTES, kept: null });
+  const [first, second, own] = boxes(week);
+  assert.equal(first.value, NOTES[0].text);
+  assert.equal(second.value, NOTES[1].text);
+  assert.equal(own.value, "");
+  const text = texts(week);
+  assert.ok(text.includes("would have scored 0.21"));
+  assert.ok(text.includes("would have scored 0.07"));
+  assert.ok(text.includes("Write my own"));
+  assert.equal(buttons(week).filter((b) => b.textContent === "Keep").length, 3);
+  assert.ok(button(week, "None"));
+});
+
+test("Keep on a note sends the note as edited", async () => {
+  const { source, week } = await openLearn({ state: "choosing", notes: NOTES, kept: null });
+  const [first] = boxes(week);
+  first.value = "The small white dog Maple is walked past the patio at dawn.";
+  first.dispatch("input");
+  buttons(week).filter((b) => b.textContent === "Keep")[0].dispatch("click");
+  await settle();
+  assert.deepEqual(source.learned, [["gA", "keep", "The small white dog Maple is walked past the patio at dawn."]]);
+});
+
+test("Keep on the second note sends the second note", async () => {
+  const { source, week } = await openLearn({ state: "choosing", notes: NOTES, kept: null });
+  buttons(week).filter((b) => b.textContent === "Keep")[1].dispatch("click");
+  await settle();
+  assert.deepEqual(source.learned, [["gA", "keep", NOTES[1].text]]);
+});
+
+test("Write my own keeps what was typed", async () => {
+  const { source, week } = await openLearn({ state: "choosing", notes: NOTES, kept: null });
+  const own = boxes(week)[2];
+  own.value = "  The recycling truck comes on Tuesdays.  ";
+  own.dispatch("input");
+  buttons(week).filter((b) => b.textContent === "Keep")[2].dispatch("click");
+  await settle();
+  assert.deepEqual(source.learned, [["gA", "keep", "The recycling truck comes on Tuesdays."]]);
+});
+
+test("a Keep with nothing in its box is off until something is typed", async () => {
+  const { source, week } = await openLearn({ state: "choosing", notes: NOTES, kept: null });
+  const keeps = buttons(week).filter((b) => b.textContent === "Keep");
+  assert.equal(Boolean(keeps[2].disabled), true);
+  keeps[2].dispatch("click");
+  await settle();
+  assert.deepEqual(source.learned, []);
+  boxes(week)[2].value = "Something";
+  boxes(week)[2].dispatch("input");
+  assert.equal(Boolean(keeps[2].disabled), false);
+  // A note cleared out cannot be kept either.
+  boxes(week)[0].value = "   ";
+  boxes(week)[0].dispatch("input");
+  assert.equal(Boolean(keeps[0].disabled), true);
+});
+
+test("None says none", async () => {
+  const { source, week } = await openLearn({ state: "choosing", notes: NOTES, kept: null });
+  button(week, "None").dispatch("click");
+  await settle();
+  assert.deepEqual(source.learned, [["gA", "none"]]);
+});
+
+test("the edit boxes stop at 300 characters (the engine's note limit), and nothing longer is sent", async () => {
+  const { source, week } = await openLearn({ state: "choosing", notes: NOTES, kept: null });
+  assert.equal(boxes(week)[0].getAttribute("maxlength"), "300");
+  assert.equal(boxes(week)[2].getAttribute("maxlength"), "300");
+  boxes(week)[2].value = "x".repeat(900);
+  boxes(week)[2].dispatch("input");
+  buttons(week).filter((b) => b.textContent === "Keep")[2].dispatch("click");
+  await settle();
+  assert.equal(source.learned[0][2], "x".repeat(300));
+});
+
+test("kept says what the guard will remember", async () => {
+  const { week } = await openLearn({ state: "kept", notes: [], kept: "Maple is a dog." });
+  assert.ok(texts(week).includes("The guard will remember: Maple is a dog."));
+  assert.equal(boxes(week).length, 0);
+});
+
+test("declined says not learned", async () => {
+  const { week } = await openLearn({ state: "declined", notes: [], kept: null });
+  assert.ok(texts(week).includes("Not learned."));
+});
+
+test("empty says so and offers Write my own", async () => {
+  const { source, week } = await openLearn({ state: "empty", notes: [], kept: null });
+  assert.ok(texts(week).includes("Nothing to learn here."));
+  assert.ok(texts(week).includes("Write my own"));
+  assert.equal(boxes(week).length, 1);
+  boxes(week)[0].value = "Own words";
+  boxes(week)[0].dispatch("input");
+  button(week, "Keep").dispatch("click");
+  await settle();
+  assert.deepEqual(source.learned, [["gA", "keep", "Own words"]]);
+  assert.equal(button(week, "None"), undefined);
+});
+
+test("failed says so and offers Write my own", async () => {
+  const { source, week } = await openLearn({ state: "failed", notes: [], kept: null });
+  assert.ok(texts(week).includes("Couldn't draft notes."));
+  assert.equal(boxes(week).length, 1);
+  boxes(week)[0].value = "Own words";
+  boxes(week)[0].dispatch("input");
+  button(week, "Keep").dispatch("click");
+  await settle();
+  assert.deepEqual(source.learned, [["gA", "keep", "Own words"]]);
+});
+
+test("without a learn on the source, or a learn in the detail, nothing is added", async () => {
+  const noSource = withLearn(fakeSource(), { state: "offered", notes: [], kept: null });
+  delete noSource.learn;
+  const week = mount("hs-week", noSource);
+  noSource.push([guardStory("gA")]);
+  await settle();
+  openFirst(week);
+  await settle();
+  await settle();
+  assert.ok(texts(week).includes("A man in a grey hoodie"));
+  assert.ok(!texts(week).includes("Should the guard learn"));
+
+  const plain = await openGuard(fakeSource());
+  assert.ok(!texts(plain).includes("Should the guard learn"));
+  assert.equal(boxes(plain).length, 0);
+});
+
+test("a learn field that is not well-formed adds nothing and never throws", async () => {
+  const bad = [
+    null,
+    "offered",
+    7,
+    [],
+    {},
+    { state: "bogus" },
+    { state: 5 },
+    { state: "kept", kept: 5 },
+    { state: "kept" },
+    { state: "choosing", notes: "x" },
+    { state: "choosing", notes: null },
+  ];
+  for (const learn of bad) {
+    const { week } = await openLearn(learn);
+    assert.ok(texts(week).includes("A man in a grey hoodie"), JSON.stringify(learn));
+    assert.ok(!texts(week).includes("Should the guard learn"), JSON.stringify(learn));
+    assert.ok(!texts(week).includes("The guard will remember"), JSON.stringify(learn));
+  }
+});
+
+test("a choosing note that is not well-formed is left out, and its score only shows when it is a number", async () => {
+  const { week } = await openLearn({
+    state: "choosing",
+    notes: [null, "x", { text: "" }, { text: 5 }, { text: "Good note", alert: "high" }, { text: "Scored", alert: 0.5 }],
+    kept: null,
+  });
+  const noteBoxes = boxes(week);
+  assert.equal(noteBoxes.length, 3); // two notes and Write my own
+  assert.equal(noteBoxes[0].value, "Good note");
+  assert.equal(noteBoxes[1].value, "Scored");
+  assert.ok(texts(week).includes("would have scored 0.50"));
+  assert.equal(texts(week).split("would have scored").length, 2);
+});
+
+test("text from the engine is shown as text, never as markup", async () => {
+  const evil = '<img src=x onerror="alert(1)"><b>bold</b>';
+  const { week } = await openLearn({ state: "choosing", notes: [{ text: evil, alert: 0.1 }], kept: null });
+  const imgsBefore = week.shadowRoot.querySelectorAll("img").length;
+  assert.equal(boxes(week)[0].value, evil);
+  const kept = await openLearn({ state: "kept", notes: [], kept: evil });
+  assert.ok(texts(kept.week).includes(`The guard will remember: ${evil}`));
+  assert.equal(kept.week.shadowRoot.querySelectorAll("img").length, imgsBefore);
+  assert.equal(kept.week.shadowRoot.querySelectorAll("b").length, 0);
+});
+
+test("the learn section's clicks and keys do not open or close the row", async () => {
+  const { week } = await openLearn({ state: "choosing", notes: NOTES, kept: null });
+  const box = boxes(week)[0];
+  // The section stops the events at its own edge; the row, one level up, never hears them.
+  let section = box.parent;
+  while (section && !section._listeners.has("keydown")) section = section.parent;
+  assert.ok(section, "a wrapper stops keydown");
+  assert.ok(section._listeners.has("click"), "and click");
+  let stopped = 0;
+  section.dispatch("keydown", { stopPropagation: () => (stopped += 1) });
+  section.dispatch("click", { stopPropagation: () => (stopped += 1) });
+  assert.equal(stopped, 2);
+});
+
+test("a push while typing keeps what was typed and gives the box its focus back", async () => {
+  const { source, week } = await openLearn({ state: "choosing", notes: NOTES, kept: null });
+  const own = boxes(week)[2];
+  own.value = "Half a thou";
+  let focused = 0;
+  own.focus = (options) => {
+    focused += 1;
+    assert.deepEqual(options, { preventScroll: true });
+  };
+  week.shadowRoot.activeElement = own;
+  source.push([guardStory("gA")]);
+  await settle();
+  const after = boxes(week)[2];
+  assert.equal(after, own, "the same box, not a new one");
+  assert.equal(after.value, "Half a thou");
+  assert.equal(focused, 1);
+});
+
+test("a re-fetch that finds no detail takes the learn section away", async () => {
+  const { source, week } = await openLearn({ state: "offered", notes: [], kept: null });
+  source.detail = async () => null;
+  button(week, "No").dispatch("click");
+  await settle();
+  await settle();
+  assert.ok(!texts(week).includes("Should the guard learn"));
+});
+
+test("detailBlock builds a learn section on its own given a source with learn", () => {
+  const source = { stepPictureUrl: async () => "/x", learn: async () => {} };
+  assert.notEqual(detailBlock(source, { id: "gA" }, { learn: { state: "declined", notes: [], kept: null } }), null);
+  const without = { stepPictureUrl: async () => "/x" };
+  assert.equal(detailBlock(without, { id: "gA" }, { learn: { state: "declined", notes: [], kept: null } }), null);
+});
+
+test("a learn call that went through but whose refresh fails turns the buttons back on and says so", async () => {
+  const { source, week } = await openLearn({ state: "offered", notes: [], kept: null });
+  source.detail = async () => {
+    throw new Error("nope");
+  };
+  button(week, "No").dispatch("click");
+  await settle();
+  await settle();
+  assert.equal(source.learned.length, 1);
+  assert.equal(Boolean(button(week, "No").disabled), false);
+  assert.ok(texts(week).includes("Sent, but couldn't refresh: reopen this story"));
+});
+
+test("the dashboard source answers a learn offer through the websocket, text only when there is some", async () => {
+  const asked = [];
+  const hass = {
+    connection: { subscribeMessage: () => Promise.resolve(() => {}) },
+    callWS: async (msg) => {
+      asked.push(msg);
+    },
+  };
+  const card = document.createElement("home-security-card");
+  card.setConfig({ show: ["now"] });
+  card.hass = hass;
+  const { source } = card._parts[0];
+  await source.learn("gA", "learn");
+  await source.learn("gA", "keep", "Maple is a dog.");
+  assert.deepEqual(asked, [
+    { type: "home_security/learn", story_id: "gA", choice: "learn" },
+    { type: "home_security/learn", story_id: "gA", choice: "keep", text: "Maple is a dog." },
+  ]);
+});
+
+test("the engine's reason for refusing a Keep is shown", async () => {
+  const { source, week } = await openLearn({ state: "choosing", notes: NOTES, kept: null });
+  source.learn = async () => {
+    throw new Error("note too long");
+  };
+  buttons(week).filter((b) => b.textContent === "Keep")[0].dispatch("click");
+  await settle();
+  await settle();
+  assert.ok(texts(week).includes("Didn't go through: note too long"));
+  // An answer with no reason (or a very long one) still reads sensibly.
+  source.learn = async () => {
+    throw new Error("");
+  };
+  buttons(week).filter((b) => b.textContent === "Keep")[0].dispatch("click");
+  await settle();
+  await settle();
+  assert.ok(texts(week).includes("Didn't go through: try again"));
+  source.learn = async () => {
+    throw { message: "y".repeat(500) };
+  };
+  buttons(week).filter((b) => b.textContent === "Keep")[0].dispatch("click");
+  await settle();
+  await settle();
+  assert.ok(texts(week).includes(`Didn't go through: ${"y".repeat(200)}`));
+  assert.ok(!texts(week).includes("y".repeat(201)));
+});
+
+// ---- Typed words survive the story moving on ----
+
+// A focus() that records which box was asked, since the test DOM has none.
+function recordFocus(box) {
+  const proto = Object.getPrototypeOf(box);
+  const calls = [];
+  proto.focus = function (options) {
+    calls.push([this, options]);
+  };
+  return { calls, restore: () => delete proto.focus };
+}
+
+test("what is typed in a box, and its focus, survive the story's `updated` moving", async () => {
+  const { source, week } = await openLearn({ state: "choosing", notes: NOTES, kept: null });
+  const [first, , own] = boxes(week);
+  first.value = "The small white dog Maple is walked past the patio at dawn, edited.";
+  first.dispatch("input");
+  own.value = "Half a thought";
+  own.dispatch("input");
+  const spy = recordFocus(own);
+  try {
+    week.shadowRoot.activeElement = own;
+    source.push([guardStory("gA", { updated: "2026-10-27T09:20:00Z" })]);
+    await settle();
+    await settle();
+    assert.deepEqual(source.detailAsked, ["gA", "gA"], "the newer story asked again");
+    const after = boxes(week);
+    assert.notEqual(after[2], own, "a rebuilt box");
+    assert.equal(after[0].value, "The small white dog Maple is walked past the patio at dawn, edited.");
+    assert.equal(after[1].value, NOTES[1].text);
+    assert.equal(after[2].value, "Half a thought");
+    // Its Keep is on, as the text is there.
+    assert.equal(Boolean(buttons(week).filter((b) => b.textContent === "Keep")[2].disabled), false);
+    const asked = spy.calls.filter(([box]) => box === after[2]);
+    assert.equal(asked.length, 1, "the rebuilt Write my own box got the focus back");
+    assert.deepEqual(asked[0][1], { preventScroll: true });
+  } finally {
+    spy.restore();
+  }
+});
+
+test("a draft is not put on a note the engine has since changed", async () => {
+  const { source, week } = await openLearn({ state: "choosing", notes: NOTES, kept: null });
+  boxes(week)[0].value = "my edit";
+  boxes(week)[0].dispatch("input");
+  source.setLearn({ state: "choosing", notes: [{ text: "A different note.", alert: 0.3 }], kept: null });
+  source.push([guardStory("gA", { updated: "2026-10-27T09:20:00Z" })]);
+  await settle();
+  await settle();
+  assert.equal(boxes(week)[0].value, "A different note.");
+});
+
+test("a draft that is put back to the original is not kept as a draft", async () => {
+  const { source, week } = await openLearn({ state: "choosing", notes: NOTES, kept: null });
+  boxes(week)[0].value = "my edit";
+  boxes(week)[0].dispatch("input");
+  boxes(week)[0].value = NOTES[0].text;
+  boxes(week)[0].dispatch("input");
+  assert.equal(week._drafts.get("gA").size, 0);
+  source.push([guardStory("gA", { updated: "2026-10-27T09:20:00Z" })]);
+  await settle();
+  await settle();
+  assert.equal(boxes(week)[0].value, NOTES[0].text);
+});
+
+test("drafts are let go after a learn call goes through", async () => {
+  const { week } = await openLearn({ state: "choosing", notes: NOTES, kept: null });
+  boxes(week)[2].value = "typed";
+  boxes(week)[2].dispatch("input");
+  assert.equal(week._drafts.get("gA").size, 1);
+  button(week, "None").dispatch("click");
+  await settle();
+  await settle();
+  assert.equal(week._drafts.get("gA").size, 0);
+});
+
+test("drafts are let go when the story leaves the list", async () => {
+  const { source, week } = await openLearn({ state: "choosing", notes: NOTES, kept: null });
+  boxes(week)[2].value = "typed";
+  boxes(week)[2].dispatch("input");
+  source.push([]);
+  await settle();
+  assert.equal(week._drafts.has("gA"), false);
+});
+
+test("focus is not pulled back to a box after the person moved on", async () => {
+  const { source, week } = await openLearn({ state: "choosing", notes: NOTES, kept: null });
+  const own = boxes(week)[2];
+  const spy = recordFocus(own);
+  try {
+    week.shadowRoot.activeElement = own;
+    source.push([guardStory("gA", { updated: "2026-10-27T09:20:00Z" })]);
+    // Before the new detail arrives, the person taps a button instead.
+    week.shadowRoot.activeElement = button(week, "None") || { hsKey: undefined };
+    await settle();
+    await settle();
+    assert.equal(spy.calls.filter(([box]) => box.hsKey?.startsWith("own")).length, 0);
+  } finally {
+    spy.restore();
+  }
+});
+
+// ---- A stale focus request, and who may answer ----
+
+// A detail the test releases by hand, to hold the rebuild back.
+function holdDetail(source, learn) {
+  const held = {};
+  source.detail = () =>
+    new Promise((resolve, reject) => {
+      held.resolve = () => resolve({ ...DETAIL, learn });
+      held.reject = () => reject(new Error("nope"));
+    });
+  return held;
+}
+
+test("focus moved elsewhere before the rebuild arrives is not pulled back", async () => {
+  const learn = { state: "choosing", notes: NOTES, kept: null };
+  const { source, week } = await openLearn(learn);
+  const own = boxes(week)[2];
+  const spy = recordFocus(own);
+  try {
+    week.shadowRoot.activeElement = own;
+    const held = holdDetail(source, learn);
+    source.push([guardStory("gA", { updated: "2026-10-27T09:20:00Z" })]);
+    await settle();
+    // The person taps elsewhere: focus leaves the box (not because of a repaint).
+    week.shadowRoot.activeElement = null;
+    week.shadowRoot.dispatch("focusout");
+    held.resolve();
+    await settle();
+    await settle();
+    assert.equal(boxes(week).length, 3, "the new block is drawn");
+    assert.equal(spy.calls.length, 0);
+  } finally {
+    spy.restore();
+  }
+});
+
+test("a rebuild's own focus loss does not cancel the request", async () => {
+  const learn = { state: "choosing", notes: NOTES, kept: null };
+  const { source, week } = await openLearn(learn);
+  const own = boxes(week)[2];
+  const spy = recordFocus(own);
+  try {
+    week.shadowRoot.activeElement = own;
+    // A browser may report the box leaving the page as a focusout during the repaint.
+    const replace = week.shadowRoot.replaceChildren.bind(week.shadowRoot);
+    week.shadowRoot.replaceChildren = (...nodes) => {
+      replace(...nodes);
+      week.shadowRoot.dispatch("focusout");
+    };
+    source.push([guardStory("gA", { updated: "2026-10-27T09:20:00Z" })]);
+    await settle();
+    await settle();
+    assert.equal(spy.calls.length, 1);
+  } finally {
+    spy.restore();
+  }
+});
+
+test("a request whose detail never arrives cannot steal focus later", async () => {
+  const learn = { state: "choosing", notes: NOTES, kept: null };
+  const { source, week } = await openLearn(learn);
+  const own = boxes(week)[2];
+  const spy = recordFocus(own);
+  try {
+    week.shadowRoot.activeElement = own;
+    const held = holdDetail(source, learn);
+    source.push([guardStory("gA", { updated: "2026-10-27T09:20:00Z" })]);
+    await settle();
+    week.shadowRoot.activeElement = null;
+    held.reject();
+    await settle();
+    // Later, the story moves on again and its detail comes.
+    source.detail = async () => ({ ...DETAIL, learn });
+    source.push([guardStory("gA", { updated: "2026-10-27T09:30:00Z" })]);
+    await settle();
+    await settle();
+    assert.equal(boxes(week).length, 3);
+    assert.equal(spy.calls.length, 0);
+  } finally {
+    spy.restore();
+  }
+});
+
+test("a source that says the person may not answer shows the state as text, with no controls", async () => {
+  for (const [learn, text] of [
+    [{ state: "offered", notes: [], kept: null }, "Learning offered."],
+    [{ state: "drafting", notes: [], kept: null }, "Drafting notes..."],
+    [{ state: "choosing", notes: NOTES, kept: null }, NOTES[0].text],
+    [{ state: "kept", notes: [], kept: "Maple is a dog." }, "The guard will remember: Maple is a dog."],
+    [{ state: "declined", notes: [], kept: null }, "Not learned."],
+    [{ state: "empty", notes: [], kept: null }, "Nothing to learn here."],
+    [{ state: "failed", notes: [], kept: null }, "Couldn't draft notes."],
+  ]) {
+    const source = withLearn(fakeSource(), learn);
+    source.canLearn = false;
+    const week = mount("hs-week", source);
+    source.push([guardStory("gA")]);
+    await settle();
+    openFirst(week);
+    await settle();
+    await settle();
+    assert.ok(texts(week).includes(text), `${learn.state} shows its text`);
+    assert.equal(boxes(week).length, 0, `${learn.state}: no box`);
+    assert.deepEqual(
+      buttons(week).map((b) => b.textContent).filter((t) => t !== "That's fine"),
+      [],
+      `${learn.state}: no button`,
+    );
+  }
+});
+
+test("read-only choosing still shows each note's score", async () => {
+  const source = withLearn(fakeSource(), { state: "choosing", notes: NOTES, kept: null });
+  source.canLearn = false;
+  const week = mount("hs-week", source);
+  source.push([guardStory("gA")]);
+  await settle();
+  openFirst(week);
+  await settle();
+  await settle();
+  assert.ok(texts(week).includes("would have scored 0.21"));
+});
+
+test("a source that does not say, or says yes, keeps the controls", async () => {
+  for (const canLearn of [undefined, true]) {
+    const source = withLearn(fakeSource(), { state: "offered", notes: [], kept: null });
+    if (canLearn !== undefined) source.canLearn = canLearn;
+    const week = mount("hs-week", source);
+    source.push([guardStory("gA")]);
+    await settle();
+    openFirst(week);
+    await settle();
+    await settle();
+    assert.ok(button(week, "Learn from this"), `canLearn=${canLearn}`);
+  }
+});
+
+test("the dashboard source follows the user's admin right", () => {
+  const make = (user) => {
+    const card = document.createElement("home-security-card");
+    card.setConfig({ show: ["now"] });
+    card.hass = { connection: {}, callWS: async () => {}, ...(user === undefined ? {} : { user }) };
+    return card._parts[0].source;
+  };
+  assert.equal(make({ is_admin: false }).canLearn, false);
+  assert.equal(make({ is_admin: true }).canLearn, true);
+  assert.notEqual(make(undefined).canLearn, false);
+});

@@ -29,6 +29,11 @@ for your dashboards, and alerts on your phones.
 - **House facts for the engine**: doors, windows, garage doors, locks, smoke, CO, gas and leak
   sensors, and who is home, are sent to the engine on start, after every reconnect, every five
   minutes and whenever one changes.
+- **The guard learning from "That's fine"**: the engine can offer, on the notification, to
+  remember a lesson from a story (buttons **Learn from this** / **No**, then the notes it
+  drafted, or your own words typed into the notification). The same choice shows in the
+  story's detail where the source supports it. Answering from the app or the websocket needs
+  an administrator, because a kept note changes what the guard reads at every look.
 - **The `home_security.mark_fine` action**, for automations and scripts.
 - **The integration's cards**, loaded on every dashboard automatically: no manual resources.
 

@@ -8,6 +8,15 @@
 // detail(id) -> Promise<{steps: [{line, choice, alert, pictures: [n]}], description}|null>
 // (null: no detail for that story), and stepPictureUrl(id, n) -> Promise<url> for a step's
 // picture number n. Without them the cards render as they always did.
+// A source may also have learn(id, choice, text) -> Promise, for the guard's offer to learn
+// from a "That's fine" (choice: "learn", "no", "keep" with the note's text, or "none"; text is
+// left off for the others). It is shown when the detail has a `learn` field:
+// {state, notes: [{text, alert}], kept}, where state is one of offered, drafting, choosing,
+// kept, declined, empty or failed; each note's alert (0 to 1) is how the alerting look would
+// have scored with that note added; kept is the note the guard now remembers. After a learn
+// call that went through, the detail is asked for again. A source may say `canLearn: false`
+// (the Home Assistant source does for a user who isn't an administrator): the learn state is
+// then shown as text, with no buttons or boxes.
 
 const LEVELS = {
   safety: { label: "SAFETY", word: "Safety", color: "#C62828" },
@@ -93,6 +102,10 @@ class HsElement extends HTMLElement {
   constructor() {
     super();
     this.attachShadow({ mode: "open" });
+    // Focus leaving a box for any reason but our own repaint cancels a pending focus request.
+    this.shadowRoot.addEventListener("focusout", () => {
+      if (!this._repainting) this._wantFocus = null;
+    });
     this._data = null;
     this._pictures = new Map();
     this._used = new Set();
@@ -170,7 +183,22 @@ class HsElement extends HTMLElement {
     return picture;
   }
   _paint(...nodes) {
+    // A box being typed in keeps its focus through a repaint, also when the box is rebuilt
+    // (and later than this paint, if its new detail is still on the way): boxes carry a key.
+    const focused = this.shadowRoot.activeElement;
+    if (focused) this._wantFocus = focused.hsKey ?? null;
+    this._repainting = true;
     this.shadowRoot.replaceChildren(el("style", {}, STYLE), ...nodes);
+    this._repainting = false;
+    if (!focused && !this._wantFocus) return;
+    const target = this._wantFocus
+      ? this.shadowRoot.querySelectorAll("textarea").find((box) => box.hsKey === this._wantFocus)
+      : focused;
+    if (!target) return;
+    this._wantFocus = null;
+    target.focus?.({ preventScroll: true });
+    const end = target.value?.length;
+    if (typeof end === "number") target.setSelectionRange?.(end, end);
   }
   async _fine(id, button) {
     button.disabled = true;
@@ -230,7 +258,7 @@ class HsStory extends HsElement {
 // A guard session's description and steps: each step's line, the guard's note on it, and
 // the pictures it cited. Built once per story version and reused, so a push never reloads
 // them. The reply comes from the engine; whatever isn't well-formed is left out.
-function detailBlock(source, story, data) {
+function detailBlock(source, story, data, refetch, drafts) {
   if (!data || typeof data !== "object") return null;
   const nodes = [];
   if (typeof data.description === "string" && data.description) {
@@ -270,7 +298,152 @@ function detailBlock(source, story, data) {
       ),
     );
   }
+  const learn = learnBlock(source, story, data.learn, refetch, drafts);
+  if (learn) nodes.push(learn);
   return nodes.length ? el("div", {}, nodes) : null;
+}
+
+// The engine keeps notes to 300 characters.
+const NOTE_MAX = 300;
+const LEARN_STATES = new Set(["offered", "drafting", "choosing", "kept", "declined", "empty", "failed"]);
+
+// The guard's offer to learn from a "That's fine", in the state the engine reports. The
+// engine's text goes in as text (and as a textarea's value), never as markup. `drafts` (a Map,
+// kept by the card per story) holds what has been typed into each box, so it survives the
+// block being rebuilt when the story moves on.
+function learnBlock(source, story, learn, refetch, drafts) {
+  if (typeof source?.learn !== "function" || !learn || typeof learn !== "object") return null;
+  if (!LEARN_STATES.has(learn.state)) return null;
+  const note = (text) => el("div", { style: "font-size:14px;line-height:1.4" }, text);
+  const mayAnswer = source.canLearn !== false;
+  const parts = [];
+  const controls = []; // everything a tap turns off while its call is out
+  const message = el("div", { class: "muted", style: "font-size:13px" });
+  // A learn call. Its controls go off while it is out, so a double tap sends one; when it
+  // went through the detail is asked for again, which brings the new state.
+  const send = async (choice, text) => {
+    for (const control of controls) control.disabled = true;
+    message.textContent = "";
+    try {
+      if (text === undefined) await source.learn(story.id, choice);
+      else await source.learn(story.id, choice, text);
+    } catch (error) {
+      for (const control of controls) control.disabled = control.wasDisabled === true;
+      // The engine's reason, when it gave one (a long one is cut).
+      const reason = typeof error?.message === "string" ? error.message.trim().slice(0, 200) : "";
+      message.textContent = `Didn't go through: ${reason || "try again"}`;
+      return;
+    }
+    drafts?.clear();
+    // Went through, but the new state may not come: say so rather than leave it stuck.
+    if ((await refetch?.()) === false) {
+      for (const control of controls) control.disabled = control.wasDisabled === true;
+      message.textContent = "Sent, but couldn't refresh: reopen this story";
+    }
+  };
+  const pill = (label, onclick) => {
+    const pill = el("button", { class: "pill" }, label);
+    pill.addEventListener("click", onclick);
+    controls.push(pill);
+    return pill;
+  };
+  // A text box and the Keep that sends it; Keep is off while the box is empty. `key` names
+  // the box for its draft and its focus: the same key on a rebuilt block is the same box.
+  const keeper = (value, label, placeholder, key) => {
+    const box = el("textarea", {
+      rows: "3",
+      maxlength: String(NOTE_MAX),
+      "aria-label": label,
+      placeholder,
+      style: "width:100%;box-sizing:border-box;font:inherit;font-size:14px;padding:8px",
+    });
+    box.hsKey = key;
+    box.value = drafts?.get(key) ?? value;
+    const keep = pill("Keep", () => {
+      const text = box.value.trim().slice(0, NOTE_MAX);
+      if (text) send("keep", text);
+    });
+    const sync = () => {
+      keep.disabled = keep.wasDisabled = !box.value.trim();
+    };
+    box.addEventListener("input", () => {
+      sync();
+      if (box.value === value) drafts?.delete(key);
+      else drafts?.set(key, box.value);
+    });
+    sync();
+    controls.push(box);
+    return [box, keep];
+  };
+  const own = () => [
+    el("div", { class: "muted", style: "font-size:13px" }, "Write my own"),
+    ...keeper("", "Write my own", "What should the guard know?", `own:${learn.state}`),
+  ];
+  switch (learn.state) {
+    case "offered":
+      if (!mayAnswer) {
+        parts.push(note("Learning offered."));
+        break;
+      }
+      parts.push(
+        note("Should the guard learn from this?"),
+        el("div", { style: "display:flex;gap:8px" }, pill("Learn from this", () => send("learn")), pill("No", () => send("no"))),
+      );
+      break;
+    case "drafting":
+      parts.push(el("div", { class: "muted", style: "font-size:14px" }, "Drafting notes..."));
+      break;
+    case "choosing": {
+      const notes = (Array.isArray(learn.notes) ? learn.notes : []).filter(
+        (n) => n && typeof n === "object" && typeof n.text === "string" && n.text,
+      );
+      if (!mayAnswer) {
+        for (const n of notes) {
+          parts.push(
+            note(n.text),
+            typeof n.alert === "number" && Number.isFinite(n.alert)
+              ? el("div", { class: "muted", style: "font-size:12px" }, `would have scored ${n.alert.toFixed(2)}`)
+              : null,
+          );
+        }
+        break;
+      }
+      for (const [i, n] of notes.entries()) {
+        const [box, keep] = keeper(n.text, "Note", "", `note:${i}:${n.text}`);
+        parts.push(
+          el(
+            "div",
+            { style: "display:flex;flex-direction:column;gap:4px" },
+            box,
+            typeof n.alert === "number" && Number.isFinite(n.alert)
+              ? el("div", { class: "muted", style: "font-size:12px" }, `would have scored ${n.alert.toFixed(2)}`)
+              : null,
+            keep,
+          ),
+        );
+      }
+      parts.push(...own(), pill("None", () => send("none")));
+      break;
+    }
+    case "kept":
+      if (typeof learn.kept !== "string" || !learn.kept) return null;
+      parts.push(note(`The guard will remember: ${learn.kept}`));
+      break;
+    case "declined":
+      parts.push(note("Not learned."));
+      break;
+    case "empty":
+      parts.push(note("Nothing to learn here."), ...(mayAnswer ? own() : []));
+      break;
+    case "failed":
+      parts.push(note("Couldn't draft notes."), ...(mayAnswer ? own() : []));
+      break;
+  }
+  parts.push(message);
+  const section = el("div", { style: "margin-top:10px;display:flex;flex-direction:column;gap:8px" }, parts);
+  // The row around it opens and closes on a click or Enter/Space; typing here is not that.
+  for (const type of ["click", "keydown"]) section.addEventListener(type, (event) => event.stopPropagation());
+  return section;
 }
 
 // This week: every story, newest first; tap one for its picture and "That's fine".
@@ -279,6 +452,12 @@ class HsWeek extends HsElement {
     super();
     this._open = null;
     this._details = new Map();
+    this._drafts = new Map(); // story id -> Map(box key -> typed text)
+  }
+  _draftsFor(id) {
+    let drafts = this._drafts.get(id);
+    if (!drafts) this._drafts.set(id, (drafts = new Map()));
+    return drafts;
   }
   // A guard session's steps (the source's optional `detail`, asked only for guard stories):
   // asked for once per story and its `updated`, when it is opened. The block, or null while
@@ -290,6 +469,7 @@ class HsWeek extends HsElement {
     if (this._detailSource !== source) {
       this._detailSource = source;
       this._details = new Map();
+      this._drafts = new Map();
     }
     const key = pictureKey(story);
     let entry = this._details.get(key);
@@ -300,19 +480,25 @@ class HsWeek extends HsElement {
     }
     return entry.block;
   }
+  // True once it has an answer (even none), false when the request failed.
   _fetchDetail(source, story, key, entry) {
     entry.failed = false;
-    Promise.resolve()
+    return Promise.resolve()
       .then(() => source.detail(story.id))
       .then(
         (data) => {
-          if (this._details.get(key) !== entry) return;
-          entry.block = detailBlock(source, story, data);
+          if (this._details.get(key) !== entry) return true;
+          const before = entry.block;
+          entry.block = detailBlock(source, story, data, () => this._fetchDetail(source, story, key, entry), this._draftsFor(story.id));
           // Never paint over "can't reach": the answer is kept for when it is back.
-          if (entry.block && !this._offline()) this._draw();
+          if ((entry.block || before) && !this._offline()) this._draw();
+          this._wantFocus = null; // the request was for this rebuild, now done
+          return true;
         },
         () => {
           if (this._details.get(key) === entry) entry.failed = true;
+          this._wantFocus = null; // no rebuild is coming for it
+          return false;
         },
       );
   }
@@ -385,6 +571,8 @@ class HsWeek extends HsElement {
     // doesn't ask again.
     const listed = new Set(stories.map(pictureKey));
     for (const key of this._details.keys()) if (!listed.has(key)) this._details.delete(key);
+    const ids = new Set(stories.map((story) => story.id));
+    for (const id of this._drafts.keys()) if (!ids.has(id)) this._drafts.delete(id);
     this._paint(
       el(
         "div",
@@ -540,6 +728,16 @@ function haSource(hass) {
     },
     setMode(mode) {
       return this.hass.callWS({ type: "home_security/set_mode", mode });
+    },
+    // Keeping a note changes what the guard reads, so the integration refuses it to anyone
+    // but an administrator; the cards then show the state only.
+    get canLearn() {
+      return this.hass?.user?.is_admin !== false;
+    },
+    learn(id, choice, text) {
+      const msg = { type: "home_security/learn", story_id: id, choice };
+      if (typeof text === "string") msg.text = text;
+      return this.hass.callWS(msg);
     },
   };
   haSources.set(hass.connection, source);

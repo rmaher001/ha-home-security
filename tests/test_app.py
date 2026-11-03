@@ -28,6 +28,7 @@ from .conftest import STORY, TOKEN, FakeEngine, setup_integration
 BASE = "/api/home_security/app"
 HOUR = 3600
 ID = STORY["id"]
+NOTE = "0123456789ab"
 
 
 class Clock:
@@ -400,6 +401,13 @@ def test_ordinary_routes_are_open_to_any_signed_in_user(method: str, path: str) 
         ("POST", "page/setup"),
         ("POST", "page/restore"),
         ("POST", "page/pair"),
+        # A kept note changes what the guard reads at every look.
+        ("POST", f"api/v1/stories/{ID}/learn"),
+        # The setup page's notes for the guard.
+        ("GET", "api/v1/guard/notes"),
+        ("POST", f"api/v1/guard/notes/{NOTE}"),
+        ("POST", f"api/v1/guard/notes/{NOTE}/remove"),
+        ("POST", f"api/v1/guard/notes/{NOTE}/restore"),
     ],
 )
 def test_settings_routes_are_for_admins(method: str, path: str) -> None:
@@ -430,7 +438,33 @@ BLOCKED = [
     ("GET", "api/v1/stories//picture.jpg"),
     ("GET", f"api/v1/stories/{ID}/extra/picture.jpg"),
     ("GET", "api/v1/stories/a%20b/picture.jpg"),
+    ("POST", "api/v1/guard/notes"),  # wrong methods
+    ("PUT", f"api/v1/guard/notes/{NOTE}"),
+    ("GET", f"api/v1/guard/notes/{NOTE}"),
+    ("GET", f"api/v1/guard/notes/{NOTE}/remove"),
+    ("GET", f"api/v1/guard/notes/{NOTE}/restore"),
+    ("DELETE", f"api/v1/guard/notes/{NOTE}/remove"),
+    ("GET", "api/v1/guard/notes/"),  # trailing slash and extra parts
+    ("POST", f"api/v1/guard/notes/{NOTE}/"),
+    ("POST", f"api/v1/guard/notes/{NOTE}/remove/"),
+    ("POST", f"api/v1/guard/notes/{NOTE}/restore/extra"),
+    ("POST", f"api/v1/guard/notes/{NOTE}/delete"),
+    ("POST", f"api/v1/guard/notes/{NOTE}/remove/restore"),
+    ("GET", "api/v1/guard/notes/extra"),
+    ("GET", "api/v1/guard"),
+    ("GET", "api/v1/guard/other"),
+    ("POST", "api/v1/guard/notes//remove"),
+    ("POST", "api/v1/guard/notes/abc/remove"),  # a bad id: too short
+    ("POST", f"api/v1/guard/notes/{NOTE}0/remove"),  # too long
+    ("POST", f"api/v1/guard/notes/{NOTE.upper()}/remove"),  # uppercase
+    ("POST", "api/v1/guard/notes/abcdefabcdeg/remove"),  # not hex
+    ("POST", "api/v1/guard/notes/..%2fx/remove"),
+    ("POST", "api/v1/guard/notes/a%20b/remove"),
     ("POST", f"api/v1/stories/{ID}/detail"),  # wrong method
+    ("GET", f"api/v1/stories/{ID}/learn"),  # wrong method
+    ("POST", f"api/v1/stories/{ID}/learn/"),
+    ("POST", f"api/v1/stories/{ID}/learn/extra"),
+    ("POST", "api/v1/stories//learn"),
     ("PUT", f"api/v1/stories/{ID}/pictures/0.jpg"),
     ("GET", f"api/v1/stories/{ID}/detail/"),
     ("GET", f"api/v1/stories/{ID}/detail/extra"),

@@ -17,7 +17,7 @@ from pytest_homeassistant_custom_component.typing import (
 
 from custom_components.home_security.const import DOMAIN
 
-from .conftest import PICTURE, STORY, FakeEngine, setup_integration, wait_for
+from .conftest import PICTURE, REFUSAL, STORY, FakeEngine, setup_integration, wait_for
 
 
 async def test_mark_fine_service(
@@ -237,3 +237,129 @@ async def test_cards_file_served_under_versioned_name(
     assert await hass.config_entries.async_reload(config_entry.entry_id)
     await hass.async_block_till_done()
     assert list(hass.data["frontend_extra_module_url"].urls).count(url) == 1
+
+
+async def test_ws_learn(
+    hass: HomeAssistant,
+    engine: FakeEngine,
+    config_entry: MockConfigEntry,
+    hass_ws_client: WebSocketGenerator,
+) -> None:
+    await setup_integration(hass, config_entry)
+    client = await hass_ws_client(hass)
+
+    await client.send_json_auto_id(
+        {"type": "home_security/learn", "story_id": STORY["id"], "choice": "learn"}
+    )
+    assert (await client.receive_json())["success"]
+    assert ("POST", "learn", (STORY["id"], {"choice": "learn", "text": None})) in engine.calls
+
+    await client.send_json_auto_id(
+        {
+            "type": "home_security/learn",
+            "story_id": STORY["id"],
+            "choice": "keep",
+            "text": "the courier comes at noon",
+        }
+    )
+    assert (await client.receive_json())["success"]
+    expected = (STORY["id"], {"choice": "keep", "text": "the courier comes at noon"})
+    assert ("POST", "learn", expected) in engine.calls
+
+
+async def test_ws_learn_errors(
+    hass: HomeAssistant,
+    engine: FakeEngine,
+    config_entry: MockConfigEntry,
+    hass_ws_client: WebSocketGenerator,
+) -> None:
+    await setup_integration(hass, config_entry)
+    client = await hass_ws_client(hass)
+
+    await client.send_json_auto_id(
+        {"type": "home_security/learn", "story_id": "01JBNOSUCH", "choice": "learn"}
+    )
+    msg = await client.receive_json()
+    assert not msg["success"]
+    assert msg["error"]["code"] == "not_found"
+
+    bad = [
+        {"story_id": "bad.id", "choice": "learn"},
+        {"story_id": STORY["id"], "choice": "Learn"},
+        {"story_id": STORY["id"], "choice": "a" * 17},
+        {"story_id": STORY["id"], "choice": ""},
+        {"story_id": STORY["id"]},
+        {"story_id": STORY["id"], "choice": "keep", "text": "x" * 501},
+        {"story_id": STORY["id"], "choice": "keep", "text": 5},
+    ]
+    for fields in bad:
+        await client.send_json_auto_id({"type": "home_security/learn", **fields})
+        assert not (await client.receive_json())["success"], fields
+    assert [c for c in engine.calls if c[1] == "learn" and c[2][0] != "01JBNOSUCH"] == []
+
+
+async def test_ws_learn_accepts_the_longest_text(
+    hass: HomeAssistant,
+    engine: FakeEngine,
+    config_entry: MockConfigEntry,
+    hass_ws_client: WebSocketGenerator,
+) -> None:
+    await setup_integration(hass, config_entry)
+    client = await hass_ws_client(hass)
+    await client.send_json_auto_id(
+        {
+            "type": "home_security/learn",
+            "story_id": STORY["id"],
+            "choice": "keep",
+            "text": "x" * 500,
+        }
+    )
+    assert (await client.receive_json())["success"]
+
+
+async def test_ws_learn_is_for_administrators(
+    hass: HomeAssistant,
+    engine: FakeEngine,
+    config_entry: MockConfigEntry,
+    hass_ws_client: WebSocketGenerator,
+    hass_read_only_access_token: str,
+) -> None:
+    """A kept note changes what the guard reads at every look, so not just anyone may keep one."""
+    await setup_integration(hass, config_entry)
+    member = await hass_ws_client(hass, hass_read_only_access_token)
+    await member.send_json_auto_id(
+        {"type": "home_security/learn", "story_id": STORY["id"], "choice": "learn"}
+    )
+    msg = await member.receive_json()
+    assert not msg["success"]
+    assert msg["error"]["code"] == "unauthorized"
+    assert [c for c in engine.calls if c[1] == "learn"] == []
+
+
+@pytest.mark.parametrize(
+    ("story", "message"),
+    [
+        ("01JBREFUSED", REFUSAL),
+        ("01JBCONFLICT", "not now"),
+        # No reason (not JSON, or not text): the generic words.
+        ("01JBPLAIN", "the engine answered 400"),
+        ("01JBODD", "the engine isn't taking that now"),
+    ],
+)
+async def test_ws_learn_carries_the_engines_reason(
+    hass: HomeAssistant,
+    engine: FakeEngine,
+    config_entry: MockConfigEntry,
+    hass_ws_client: WebSocketGenerator,
+    story: str,
+    message: str,
+) -> None:
+    await setup_integration(hass, config_entry)
+    client = await hass_ws_client(hass)
+    await client.send_json_auto_id(
+        {"type": "home_security/learn", "story_id": story, "choice": "keep", "text": "a note"}
+    )
+    msg = await client.receive_json()
+    assert not msg["success"]
+    assert msg["error"]["code"] == "engine_error"
+    assert msg["error"]["message"] == message
