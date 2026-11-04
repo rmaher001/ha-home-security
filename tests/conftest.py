@@ -25,6 +25,8 @@ PAIR_CODE = "ABCD-EF23"
 WEBHOOK_ID = "test-webhook-id"
 WEBHOOK_SECRET = "test-webhook-secret"
 PICTURE = b"\xff\xd8\xff\xe0fake-jpeg\xff\xd9"
+# One part of a Live stream: the boundary, its headers and a "frame".
+LIVE_PART = b"--frame\r\nContent-Type: image/jpeg\r\n\r\nframe %d\r\n"
 CLIP = b"\x00\x00\x00\x18ftypmp42" + bytes(range(256)) * 40
 
 STATE: dict[str, Any] = {
@@ -80,6 +82,7 @@ class FakeEngine:
 
         self.clip_mode: str | None = None  # "broken", "slow" or "gzip": a recording that misbehaves
         self.clip_stopped = False  # the "slow" recording stopped being read
+        self.live_seen = asyncio.Event()  # the test saw the last Live frame: send the next
         self.redirect_root = False
         self.want_snapshot = False
 
@@ -110,6 +113,8 @@ class FakeEngine:
         app.router.add_get("/api/v1/stories", self._stories)
         app.router.add_get("/api/v1/stories/{id}/picture.jpg", self._picture)
         app.router.add_get("/api/v1/stories/{id}/clip/{stop}.mp4", self._clip)
+        app.router.add_get("/api/v1/cameras/{camera}/footage/{minute}-{quality}.mp4", self._footage)
+        app.router.add_get("/api/v1/cameras/{camera}/live", self._live)
         app.router.add_post("/api/v1/stories/{id}/fine", self._fine)
         app.router.add_post("/api/v1/stories/{id}/learn", self._learn)
         app.router.add_post("/api/v1/sensors", self._sensors)
@@ -275,6 +280,35 @@ class FakeEngine:
 
     async def _page(self, request: web.Request) -> web.Response:
         return web.json_response({"page": request.match_info["tail"]})
+
+    async def _footage(self, request: web.Request) -> web.Response:
+        """A camera's minute of footage: the clip's bytes, by byte range like the clip."""
+        if not self._authorized(request):
+            return self._refuse()
+        if (asked := request.headers.get("Range", "")).startswith("bytes="):
+            first, _, last = asked[len("bytes=") :].partition("-")
+            start, end = int(first), int(last) if last else len(CLIP) - 1
+            return web.Response(
+                status=206,
+                body=CLIP[start : end + 1],
+                content_type="video/mp4",
+                headers={"Content-Range": f"bytes {start}-{end}/{len(CLIP)}"},
+            )
+        return web.Response(body=CLIP, content_type="video/mp4")
+
+    async def _live(self, request: web.Request) -> web.StreamResponse:
+        """Live: a frame at a time, the next only after the viewer saw the first."""
+        if not self._authorized(request):
+            return self._refuse()
+        resp = web.StreamResponse(
+            headers={"Content-Type": "multipart/x-mixed-replace; boundary=frame"}
+        )
+        await resp.prepare(request)
+        for n in range(3):
+            await resp.write(LIVE_PART % n)
+            await self.live_seen.wait()
+            self.live_seen.clear()
+        return resp
 
     async def _slow(self, request: web.Request) -> web.StreamResponse:
         """A response that never ends: one chunk, then silence."""

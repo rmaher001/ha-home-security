@@ -224,6 +224,7 @@ def async_get_app_access(hass: HomeAssistant) -> AppAccess:
 # case-sensitively and exactly (no trailing-slash variants).
 _ID = r"[A-Za-z0-9_-]{1,64}"
 _NOTE = r"[0-9a-f]{12}"
+_CAMERA = r"[0-9a-f]{24}"  # a Protect camera id
 _ROUTES: tuple[tuple[str, re.Pattern[str], str], ...] = tuple(
     (method, re.compile(pattern), kind)
     for method, pattern, kind in (
@@ -237,6 +238,14 @@ _ROUTES: tuple[tuple[str, re.Pattern[str], str], ...] = tuple(
         ("GET", rf"api/v1/stories/{_ID}/pictures/[0-9]{{1,4}}\.jpg", "open"),
         # Protect's recording around one stop of a visit (video, streamed through).
         ("GET", rf"api/v1/stories/{_ID}/clip/[0-9]{{1,3}}\.mp4", "open"),
+        # A camera through time on the event page: its footage a minute at a time (video,
+        # streamed through and sought by byte range), a frame at a moment, its detections
+        # for a span, and Live (one long answer, a frame at a time). Times are epoch seconds.
+        ("GET", r"api/v1/cameras", "open"),
+        ("GET", rf"api/v1/cameras/{_CAMERA}/footage/[0-9]{{10}}-(?:low|full)\.mp4", "open"),
+        ("GET", rf"api/v1/cameras/{_CAMERA}/frame/[0-9]{{10}}\.jpg", "open"),
+        ("GET", rf"api/v1/cameras/{_CAMERA}/detections/[0-9]{{10}}-[0-9]{{10}}", "open"),
+        ("GET", rf"api/v1/cameras/{_CAMERA}/live", "open"),
         ("POST", rf"api/v1/stories/{_ID}/fine", "open"),
         ("PUT", r"api/v1/mode", "open"),
         ("PUT", r"api/v1/alerts", "open"),

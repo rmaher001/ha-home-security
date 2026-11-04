@@ -23,12 +23,13 @@ from custom_components.home_security.app_proxy import (
     async_get_app_access,
 )
 
-from .conftest import CLIP, STORY, TOKEN, FakeEngine, setup_integration
+from .conftest import CLIP, LIVE_PART, STORY, TOKEN, FakeEngine, setup_integration
 
 BASE = "/api/home_security/app"
 HOUR = 3600
 ID = STORY["id"]
 NOTE = "0123456789ab"
+CAM = "0a1b2c3d4e5f60718293a4b5"  # an invented id, shaped like Protect's: 24 lowercase hex
 
 
 class Clock:
@@ -390,6 +391,13 @@ async def test_unloading_cuts_a_streaming_response(
         ("PUT", "api/v1/mode"),
         ("PUT", "api/v1/alerts"),
         ("GET", "api/v1/ws"),
+        # A camera through time on the event page.
+        ("GET", "api/v1/cameras"),
+        ("GET", f"api/v1/cameras/{CAM}/footage/1793761200-low.mp4"),
+        ("GET", f"api/v1/cameras/{CAM}/footage/1793761200-full.mp4"),
+        ("GET", f"api/v1/cameras/{CAM}/frame/1793761234.jpg"),
+        ("GET", f"api/v1/cameras/{CAM}/detections/1793760000-1793763600"),
+        ("GET", f"api/v1/cameras/{CAM}/live"),
     ],
 )
 def test_ordinary_routes_are_open_to_any_signed_in_user(method: str, path: str) -> None:
@@ -511,6 +519,38 @@ BLOCKED = [
     ("GET", "//api/v1/state"),
     ("GET", "api/v1/state%00"),
     ("GET", "%2e"),
+    # The camera routes: exact ids, ten-digit times, low or full, nothing more.
+    ("GET", "api/v1/cameras/"),
+    ("POST", "api/v1/cameras"),
+    ("GET", f"api/v1/cameras/{CAM}"),
+    ("GET", f"api/v1/cameras/{CAM.upper()}/live"),  # uppercase
+    ("GET", f"api/v1/cameras/{CAM[:-1]}/live"),  # 23 characters
+    ("GET", f"api/v1/cameras/{CAM}0/live"),  # 25
+    ("GET", f"api/v1/cameras/{CAM[:-1]}g/live"),  # not hex
+    ("GET", "api/v1/cameras//live"),
+    ("GET", f"api/v1/cameras/{CAM}/live/"),
+    ("GET", f"api/v1/cameras/{CAM}/live/extra"),
+    ("POST", f"api/v1/cameras/{CAM}/live"),
+    ("GET", f"api/v1/cameras/{CAM}/footage/179376120-low.mp4"),  # nine digits
+    ("GET", f"api/v1/cameras/{CAM}/footage/17937612000-low.mp4"),  # eleven
+    ("GET", f"api/v1/cameras/{CAM}/footage/1793761200-medium.mp4"),
+    ("GET", f"api/v1/cameras/{CAM}/footage/1793761200-low.mp4/"),
+    ("GET", f"api/v1/cameras/{CAM}/footage/1793761200-low.jpg"),
+    ("GET", f"api/v1/cameras/{CAM}/footage/1793761200.mp4"),
+    ("GET", f"api/v1/cameras/{CAM}/footage/-1793761200-low.mp4"),
+    ("PUT", f"api/v1/cameras/{CAM}/footage/1793761200-low.mp4"),
+    ("GET", f"api/v1/cameras/{CAM}/footage/%2e%2e/1793761200-low.mp4"),
+    ("GET", f"api/v1/cameras/{CAM}/frame/179376123.jpg"),
+    ("GET", f"api/v1/cameras/{CAM}/frame/1793761234.png"),
+    ("GET", f"api/v1/cameras/{CAM}/frame/1793761234.jpg/x"),
+    ("GET", f"api/v1/cameras/{CAM}/frame/1793761234xjpg"),  # the dot is a dot
+    ("GET", f"api/v1/cameras/{CAM}/footage/1793761200-lowxmp4"),
+    ("GET", f"api/v1/cameras/{CAM}/detections/1793760000"),
+    ("GET", f"api/v1/cameras/{CAM}/detections/1793760000-"),
+    ("GET", f"api/v1/cameras/{CAM}/detections/1793760000-179376360"),
+    ("GET", f"api/v1/cameras/{CAM}/detections/1793760000-1793763600/"),
+    ("GET", f"api/v1/cameras/{CAM}/other"),
+    ("GET", f"api/v1/cameras/..%2f{CAM}/live"),
 ]
 
 
@@ -616,6 +656,33 @@ async def test_a_recording_streams_through_and_can_be_sought(
     assert engine.echoes[-1]["headers"]["Range"] == "bytes=5-14"
     assert engine.echoes[-1]["headers"]["Authorization"] == f"Bearer {TOKEN}"
     assert (await browser.get(f"{BASE}/api/v1/stories/{ID}/clip/2.mp4")).status == 404
+
+
+async def test_a_cameras_footage_streams_through_and_can_be_sought(
+    hass: HomeAssistant, engine: FakeEngine, browser, clock: Clock
+) -> None:
+    path = f"{BASE}/api/v1/cameras/{CAM}/footage/1793761200-low.mp4"
+    assert await (await browser.get(path)).read() == CLIP
+    part = await browser.get(path, headers={"Range": "bytes=5-14"})
+    assert part.status == 206
+    assert part.headers["Content-Range"] == f"bytes 5-14/{len(CLIP)}"
+    assert await part.read() == CLIP[5:15]
+    assert engine.echoes[-1]["headers"]["Range"] == "bytes=5-14"
+
+
+async def test_live_passes_through_a_frame_at_a_time(
+    hass: HomeAssistant, engine: FakeEngine, browser, clock: Clock
+) -> None:
+    """Each frame reaches the browser as the engine sends it: nothing waits for the rest."""
+    resp = await browser.get(f"{BASE}/api/v1/cameras/{CAM}/live")
+    assert resp.status == 200
+    assert resp.headers["Content-Type"] == "multipart/x-mixed-replace; boundary=frame"
+    for n in range(3):
+        got = b""
+        async with asyncio.timeout(3):
+            while got != LIVE_PART % n:
+                got += await resp.content.readany()
+        engine.live_seen.set()
 
 
 async def test_the_key_never_reaches_the_browser(
