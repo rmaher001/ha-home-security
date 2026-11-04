@@ -302,7 +302,7 @@ class FakeEngine:
         if not self._authorized(request):
             return self._refuse()
         resp = web.StreamResponse(
-            headers={"Content-Type": "multipart/x-mixed-replace; boundary=frame"}
+            headers={"Content-Type": "application/octet-stream"}
         )
         await resp.prepare(request)
         for n in range(3):

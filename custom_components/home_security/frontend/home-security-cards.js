@@ -37,7 +37,7 @@
 // Promise<url>, a JPEG of the recording at an epoch second; detections(camera, start, end) ->
 // Promise<[{start, end|null, types: [...], sound}]>, epoch seconds; cameras() ->
 // Promise<[{id, name, place}]>; and liveStreamUrl(camera) -> Promise<url>, the camera now as
-// multipart/x-mixed-replace JPEGs. Each stop with a camera is then a player scrubbed through
+// JPEGs framed as multipart parts. Each stop with a camera is then a player scrubbed through
 // time (a stop's `camera_time` is where it starts, else its `time`), in place of its
 // thumbnail and Watch live.
 

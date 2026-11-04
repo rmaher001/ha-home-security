@@ -698,7 +698,7 @@ async def test_live_passes_through_a_frame_at_a_time(
     """Each frame reaches the browser as the engine sends it: nothing waits for the rest."""
     resp = await browser.get(f"{BASE}/api/v1/cameras/{CAM}/live")
     assert resp.status == 200
-    assert resp.headers["Content-Type"] == "multipart/x-mixed-replace; boundary=frame"
+    assert resp.headers["Content-Type"] == "application/octet-stream"
     for n in range(3):
         got = b""
         async with asyncio.timeout(3):
