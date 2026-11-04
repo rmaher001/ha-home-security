@@ -632,6 +632,8 @@ const SCRUB_WINDOW_S = 120; // how much time the tape shows across its width
 // Protect's recording of a minute is whole 40 s after it ends (the engine refuses it sooner);
 // 5 s more here, for a phone whose clock runs a little ahead of the engine's.
 const SETTLE_S = 45;
+const LIVE_EDGE_S = 5; // a camera the owner scrubbed is Live again only this close to now
+const LOAD_AGAIN_S = 10; // a minute Protect hasn't finished is asked for again this often
 const TICK_BLOCK_S = 600; // detections are asked for ten minutes at a time
 const TICK_FRESH_S = 30; // the block holding now is asked again this often, near Live
 const RETRY_S = 30; // a minute or a block of detections that failed waits this long
@@ -906,12 +908,14 @@ function scrubView(source, alertAt, barSlot) {
   }
 
   // Move a camera (and, in sync, all of them) to a moment, never past now. Only a camera
-  // whose time changed is redrawn.
-  function move(lane, value, dragging) {
+  // whose time changed is redrawn. `scrub`: the owner put it there by hand (a drag or the
+  // keys), so it is Live only at the right edge; any other move clears that.
+  function move(lane, value, dragging, scrub = dragging) {
     const t = Math.min(now(), Math.max(0, value));
     const times = syncTimes(lanes.map((l) => l.t), lanes.indexOf(lane), t, ctl.sync);
     lanes.forEach((l, i) => {
-      if (times[i] === l.t && l !== lane) return;
+      if (times[i] === l.t && l !== lane) return; // a camera not moved keeps its mark
+      l.scrubbed = scrub;
       if (times[i] !== l.t) l.unfreeze(); // taken elsewhere; one left where it is stays paused
       l.t = times[i];
       l.follow = false; // where it was taken; draw() says whether that is Live
@@ -1037,7 +1041,7 @@ function scrubView(source, alertAt, barSlot) {
   // One camera's player. `anchor` is its stop's moment (for one added: when it was added).
   function lane({ camera, place, anchor, added }) {
     const name = place || "Camera";
-    const self = { camera, place, anchor, added: added === true, t: anchor, follow: false, playing: false, live: false, liveState: null, frozen: false, full: false, quality: "low", key: null, steady: null, visible: true, ticksReady: false };
+    const self = { camera, place, anchor, added: added === true, t: anchor, follow: false, scrubbed: false, playing: false, live: false, liveState: null, frozen: false, full: false, quality: "low", key: null, steady: null, visible: true, ticksReady: false };
     const makeVideo = (cls, label) => {
       const v = el("video", { class: cls, playsinline: true, muted: true, preload: "auto", "aria-label": label });
       v.muted = true;
@@ -1081,6 +1085,8 @@ function scrubView(source, alertAt, barSlot) {
     const player = el("div", { class: "s-player" }, pic, tape, read);
     const failed = new Map(); // a minute's key -> when it couldn't be had
     let stillTimer = null;
+    let againTimer = null; // a minute Protect hasn't finished is asked for again when it fires
+    let waitingFor = null; // the minute the engine said 425 to: not asked for again until the timer
     let deadTimer = null;
     let ticksTimer = null;
     let liveSince = null; // when the stream last showed a picture
@@ -1140,6 +1146,11 @@ function scrubView(source, alertAt, barSlot) {
       const minute = minuteOf(self.t);
       const key = `${minute}-${self.quality}`;
       if (self.key === key) return;
+      // A scrub into a minute Protect hasn't finished (or one it said 425 to a moment ago).
+      if ((self.scrubbed && isLive(self.t, now())) || (againTimer !== null && waitingFor === minute)) {
+        waitForMinute(minute);
+        return;
+      }
       const missed = failed.get(key);
       if (missed !== undefined && now() - missed < RETRY_S) {
         say("Couldn't load this minute.");
@@ -1162,6 +1173,22 @@ function scrubView(source, alertAt, barSlot) {
       const into = inFront.key === null || inFront.broken ? front : back;
       swapWhenReady = into === back;
       await fill(into, minute, self.quality, () => self.key === key);
+    }
+    // The owner scrubbed to a minute Protect hasn't finished: no Live, no footage yet. The
+    // still for the moment shows (if the engine has one), the lane says so, and the minute is
+    // asked for again every LOAD_AGAIN_S. `held`: the engine said 425, so it waits for the timer;
+    // otherwise (our clock says the minute isn't done) a redraw asks as soon as the clock says it is.
+    function waitForMinute(minute, held = false) {
+      self.key = null;
+      if (held) waitingFor = minute;
+      say("Protect is still recording this minute.");
+      if (againTimer !== null) return;
+      wantStill();
+      againTimer = setTimeout(() => {
+        againTimer = null;
+        waitingFor = null;
+        if (!ctl.paused && !self.live && !self.frozen) self.draw(false);
+      }, LOAD_AGAIN_S * 1000);
     }
     // Give a video a minute's footage, unless it is no longer wanted when the address comes.
     async function fill(v, minute, quality, wanted) {
@@ -1295,6 +1322,7 @@ function scrubView(source, alertAt, barSlot) {
         if (!isFront() || !self.playing || held.get(v).key !== self.key) return; // not after a jump
         const loaded = Number.parseInt(held.get(v).key ?? "", 10); // the minute that ended
         self.t = (Number.isFinite(loaded) ? loaded : minuteOf(self.t)) + 60;
+        self.scrubbed = false; // played on past where it was put: the last minutes are Live again
         const ahead = held.get(back);
         if (ahead.ready && !ahead.broken && Number.parseInt(ahead.key ?? "", 10) === minuteOf(self.t) && !isLive(self.t, now())) {
           self.key = ahead.key;
@@ -1304,8 +1332,9 @@ function scrubView(source, alertAt, barSlot) {
         }
         self.draw(false);
       });
-      // A minute that fails: a 425 means Protect is still writing it (Live, then); anything
-      // else waits RETRY_S. A minute loading ahead that fails is let go quietly.
+      // A minute that fails: a 425 means Protect is still writing it (Live, then; a lane the
+      // owner scrubbed there waits for it instead); anything else waits RETRY_S. A minute
+      // loading ahead that fails is let go quietly.
       v.addEventListener("error", async () => {
         const state = held.get(v);
         const key = state.key;
@@ -1328,6 +1357,10 @@ function scrubView(source, alertAt, barSlot) {
         if (self.key !== key || ctl.paused) return;
         if (status === 425) {
           self.key = null;
+          if (self.scrubbed) {
+            waitForMinute(Number.parseInt(key, 10), true); // where the owner put it: no snapping to Live
+            return;
+          }
           self.follow = true;
           self.draw(false);
           return;
@@ -1636,9 +1669,11 @@ function scrubView(source, alertAt, barSlot) {
         return;
       }
       if (self.follow) self.t = n;
-      const isNow = isLive(self.t, n);
+      // A lane the owner scrubbed is Live only at the right edge; others, until Protect has the minute.
+      const isNow = self.scrubbed ? self.t >= n - LIVE_EDGE_S : isLive(self.t, n);
       if (isNow) {
         self.follow = true; // Live goes on with time
+        self.scrubbed = false;
         self.t = n;
       }
       setLive(isNow);
@@ -1689,7 +1724,7 @@ function scrubView(source, alertAt, barSlot) {
       self.prime();
       if (!self.live && !ctl.paused) {
         load();
-        playFront();
+        if (againTimer === null) playFront(); // a minute Protect hasn't finished plays when it comes
       }
       run();
     };
@@ -1707,6 +1742,9 @@ function scrubView(source, alertAt, barSlot) {
       self.pause();
       clearTimeout(stillTimer);
       clearTimeout(ticksTimer);
+      clearTimeout(againTimer);
+      againTimer = null;
+      waitingFor = null;
       for (const v of [front, back, lapse]) {
         v.removeAttribute("src"); // nothing held open: asked for again on waking
         v.load?.();
@@ -1788,7 +1826,7 @@ function scrubView(source, alertAt, barSlot) {
       const value = Number((event.target ?? event.currentTarget)?.value);
       if (!Number.isFinite(value)) return;
       touch();
-      move(self, value, false);
+      move(self, value, false, true); // stepped by hand, like a drag
     });
 
     // Drag on the picture or the tape. Up and down still scrolls the page (touch-action).
@@ -1908,7 +1946,7 @@ function scrubView(source, alertAt, barSlot) {
       last: ctl.last?.camera ?? null,
       focus: ctl.focus?.camera ?? null,
       heard: ctl.heard?.camera ?? null,
-      lanes: lanes.map((l) => ({ camera: l.camera, place: l.place, anchor: l.anchor, added: l.added, t: l.t, follow: l.follow, full: l.full })),
+      lanes: lanes.map((l) => ({ camera: l.camera, place: l.place, anchor: l.anchor, added: l.added, t: l.t, follow: l.follow, scrubbed: l.scrubbed, full: l.full })),
     }),
     adopt(state, addRow) {
       if (!state) return;
@@ -1920,6 +1958,7 @@ function scrubView(source, alertAt, barSlot) {
         used.add(one);
         one.t = was.t;
         one.follow = was.follow;
+        one.scrubbed = was.scrubbed === true;
         one.full = was.full;
         one.player.setAttribute("class", `s-player${one.full ? " s-full" : ""}`);
       }

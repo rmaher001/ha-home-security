@@ -3002,6 +3002,281 @@ test("a minute the engine says isn't recorded yet (425) goes to Live", async () 
   }
 });
 
+// --- scrubbing back from Live (#48): a lane the owner dragged leaves Live at once ---------------
+
+// A clock that stands still at 30 s into a minute (no test below depends on the wall clock's
+// second); `advance(ms)` moves it on.
+async function withStillClock(fn) {
+  let ms = Date.UTC(2026, 10, 4, 18, 0, 30);
+  Date.now = () => ms;
+  await fn((add) => (ms += add));
+}
+const WAITING = "Protect is still recording this minute.";
+// Drag lane 0's picture by `dx` px (right is back in time, 0.4 s a px on the 300 px default) and
+// let go after holding still, so nothing glides.
+function dragBy(week, from, dx, ts) {
+  const { pics } = lanesOf(week);
+  pdown(pics[0], from, ts);
+  pmove(pics[0], from + dx, ts + 10);
+  pup(pics[0], from + dx, ts + 2000);
+}
+
+test("a short drag back from Live leaves Live and the time stays where it was dragged", async () => {
+  await withStillClock(async () => {
+    const source = withScrub(withClips(withDetail(fakeSource(), recentDetail())));
+    const week = await openVisit(source);
+    await settle();
+    const { clocks } = lanesOf(week);
+    assert.equal(clocks[0].textContent, "Live");
+    const nowS = Date.now() / 1000;
+    dragBy(week, 100, 25, 0); // 25 px: 10 s back
+    await settle();
+    assert.notEqual(clocks[0].textContent, "Live");
+    assert.equal(timeOf(week, 0), nowS - 10);
+    await wait(120); // a few frames: it stays
+    assert.notEqual(clocks[0].textContent, "Live");
+    assert.equal(timeOf(week, 0), nowS - 10);
+    week._current.get("gV").pause();
+  });
+});
+
+test("a move on one camera leaves another camera's scrub alone", async () => {
+  await withStillClock(async () => {
+    const source = withScrub(withClips(withDetail(fakeSource(), recentDetail())));
+    const week = await openVisit(source);
+    await settle();
+    const nowS = Date.now() / 1000;
+    dragBy(week, 100, 25, 0); // camera 0: 10 s back
+    await settle();
+    lanesOf(week).keys[1].dispatch("input", { target: { value: String(Math.floor(nowS) - 3600) } });
+    lanesOf(week).btns[0].dispatch("click"); // a redraw of camera 0
+    await wait(120);
+    assert.notEqual(lanesOf(week).clocks[0].textContent, "Live", "camera 0 stays where it was dragged");
+    assert.equal(timeOf(week, 0), nowS - 10);
+    week._current.get("gV").pause();
+  });
+});
+
+test("a newer version keeps a camera scrubbed back from Live where it was", async () => {
+  await withStillClock(async (add) => {
+    const source = withScrub(withClips(withDetail(fakeSource(), recentDetail())));
+    const week = await openVisit(source);
+    await settle();
+    const nowS = Date.now() / 1000;
+    dragBy(week, 100, 25, 0);
+    await settle();
+    const newer = recentDetail();
+    newer.visit.headline = "NEWER VERSION HEADLINE";
+    source.detail = async () => newer;
+    add(10000);
+    source.push([guardStory("gV", { title: TRIAL_TITLE, updated: NEWER })]);
+    await settle();
+    await settle();
+    await settle();
+    assert.ok(texts(week).includes("NEWER VERSION HEADLINE"));
+    assert.notEqual(lanesOf(week).clocks[0].textContent, "Live");
+    assert.equal(timeOf(week, 0), nowS - 10);
+    week._current.get("gV").pause();
+  });
+});
+
+test("stepping back from Live with the keys is a scrub too", async () => {
+  await withStillClock(async () => {
+    const source = withScrub(withClips(withDetail(fakeSource(), recentDetail())));
+    const week = await openVisit(source);
+    await settle();
+    const nowS = Math.floor(Date.now() / 1000);
+    lanesOf(week).keys[0].dispatch("input", { target: { value: String(nowS - 10) } });
+    await settle();
+    assert.notEqual(lanesOf(week).clocks[0].textContent, "Live");
+    week._current.get("gV").pause();
+  });
+});
+
+test("a flick back from Live glides on in the past, not back to Live", async () => {
+  await withStillClock(async () => {
+    const source = withScrub(withClips(withDetail(fakeSource(), recentDetail())));
+    const week = await openVisit(source);
+    await settle();
+    const { pics, clocks } = lanesOf(week);
+    const nowS = Date.now() / 1000;
+    pdown(pics[0], 100, 0);
+    pmove(pics[0], 130, 10);
+    pmove(pics[0], 160, 20);
+    pup(pics[0], 160, 30); // let go in motion: it glides
+    await wait(200);
+    assert.notEqual(clocks[0].textContent, "Live");
+    assert.ok(timeOf(week, 0) < nowS - 10);
+    week._current.get("gV").pause();
+  });
+});
+
+test("a scrubbed camera is Live again only in the last 5 s", async () => {
+  await withStillClock(async () => {
+    const source = withScrub(withClips(withDetail(fakeSource(), recentDetail())));
+    const week = await openVisit(source);
+    await settle();
+    const { clocks } = lanesOf(week);
+    dragBy(week, 100, 40, 0); // 16 s back
+    await settle();
+    dragBy(week, 140, -20, 5000); // 8 s forward: 8 s behind now
+    await settle();
+    assert.notEqual(clocks[0].textContent, "Live");
+    dragBy(week, 120, -10, 10000); // 4 s forward: 4 s behind now
+    await settle();
+    assert.equal(clocks[0].textContent, "Live");
+    week._current.get("gV").pause();
+  });
+});
+
+test("a scrubbed camera that plays on to the end of the recording goes Live, as before", async () => {
+  await withStillClock(async (advance) => {
+    const detail = visitDetail();
+    detail.visit.stops[0].time = new Date(Date.now() - 150 * 1000).toISOString();
+    const source = withScrub(withClips(withDetail(fakeSource(), detail)));
+    const week = await openVisit(source);
+    const { btns, clocks } = lanesOf(week);
+    dragBy(week, 100, 25, 0); // scrubbed: put at a past moment by the owner
+    await settle();
+    assert.notEqual(clocks[0].textContent, "Live");
+    btns[0].dispatch("click");
+    for (let i = 0; i < 4 && clocks[0].textContent !== "Live"; i++) {
+      lanesOf(week).videos[0].dispatch("ended"); // a minute ends; the next comes forward
+      await settle();
+      forward(week, 0);
+    }
+    assert.equal(clocks[0].textContent, "Live");
+    advance(120000);
+    await wait(150);
+    assert.equal(clocks[0].textContent, "Live");
+    week._current.get("gV").pause();
+  });
+});
+
+test("go Live and a picked time still use the old rule after a scrub", async () => {
+  await withStillClock(async () => {
+    const source = withScrub(withClips(withDetail(fakeSource(), recentDetail())));
+    const week = await openVisit(source);
+    await settle();
+    const { clocks } = lanesOf(week);
+    const nowS = Date.now() / 1000;
+    dragBy(week, 100, 25, 0);
+    await settle();
+    assert.notEqual(clocks[0].textContent, "Live");
+    const input = allByClass(week, "input", "s-time")[0];
+    input.value = localInput(nowS - 10);
+    input.dispatch("change", { target: input }); // a picked time: the mark is gone, "within the minute" is Live
+    await settle();
+    assert.equal(clocks[0].textContent, "Live");
+    week._current.get("gV").pause();
+  });
+});
+
+test("a scrub to a minute Protect hasn't finished shows its still and says so, asks again, and plays when it comes", async () => {
+  await withStillClock(async (advance) => {
+    const source = withScrub(withClips(withDetail(fakeSource(), recentDetail())));
+    const week = await openVisit(source);
+    await settle();
+    const { clocks, btns } = lanesOf(week);
+    const nowS = Date.now() / 1000;
+    const again = [];
+    const realTimeout = globalThis.setTimeout;
+    globalThis.setTimeout = (fn, ms, ...rest) => {
+      if (ms === 10000) again.push(fn);
+      return realTimeout(fn, ms, ...rest);
+    };
+    try {
+      dragBy(week, 100, 25, 0); // 10 s back: the minute is still being recorded
+      await wait(300);
+      assert.notEqual(clocks[0].textContent, "Live");
+      assert.ok(texts(week).includes(WAITING));
+      assert.ok(!source.footageAsked.some(([camera]) => camera === "cam-side")); // not asked for yet
+      assert.equal(allByClass(week, "img", "s-still")[0].src, `/frame/cam-side/${nowS - 10}.jpg`);
+      assert.ok(again.length > 0); // and asked again in 10 s
+      // Play waits for the minute; it doesn't go Live.
+      const plays = [];
+      for (const v of [...lanesOf(week).videos, ...lanesOf(week).standbys]) v.play = () => (plays.push(v), Promise.resolve());
+      btns[0].dispatch("click");
+      await wait(150);
+      assert.notEqual(clocks[0].textContent, "Live");
+      assert.equal(timeOf(week, 0), nowS - 10);
+      assert.ok(!source.footageAsked.some(([camera]) => camera === "cam-side"));
+      assert.equal(plays.length, 0);
+      // Protect finishes the minute: it loads and plays.
+      advance(80000);
+      await wait(150);
+      const minute = Math.floor((nowS - 10) / 60) * 60;
+      assert.ok(source.footageAsked.some(([camera, m]) => camera === "cam-side" && m === minute));
+      const front = lanesOf(week).videos[0];
+      front.src = "/footage/cam-side/minute.mp4";
+      front.readyState = 4;
+      front.dispatch("loadedmetadata");
+      front.dispatch("loadeddata");
+      assert.ok(plays.includes(front));
+      assert.ok(!texts(week).includes(WAITING));
+      assert.notEqual(clocks[0].textContent, "Live");
+    } finally {
+      globalThis.setTimeout = realTimeout;
+    }
+    week._current.get("gV").pause();
+  });
+});
+
+test("a 425 on a scrubbed camera shows the still and the note, asks again every 10 s, and plays when the minute comes", async () => {
+  await withStillClock(async () => {
+    const realFetch = globalThis.fetch;
+    let status = 425;
+    globalThis.fetch = (url, options) => (String(url).startsWith("/footage/") ? Promise.resolve({ status }) : realFetch(url, options));
+    const again = [];
+    const realTimeout = globalThis.setTimeout;
+    globalThis.setTimeout = (fn, ms, ...rest) => {
+      if (ms === 10000) again.push(fn);
+      return realTimeout(fn, ms, ...rest);
+    };
+    try {
+      const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+      const week = await openVisit(source);
+      const { clocks, btns } = lanesOf(week);
+      dragBy(week, 100, 25, 0); // scrubbed: the owner put it here
+      await settle();
+      let plays = 0;
+      const front = lanesOf(week).videos[0];
+      front.play = () => (plays++, Promise.resolve());
+      btns[0].dispatch("click");
+      await settle();
+      const t = timeOf(week, 0);
+      front.src = "/footage/x";
+      front.dispatch("error"); // Protect says 425
+      await wait(300);
+      assert.notEqual(clocks[0].textContent, "Live");
+      assert.equal(timeOf(week, 0), t);
+      assert.ok(texts(week).includes(WAITING));
+      assert.equal(allByClass(week, "img", "s-still")[0].src, `/frame/cam-side/${t}.jpg`);
+      assert.ok(again.length > 0);
+      // Not asked again before the 10 s are up, though it is playing and redrawn each frame.
+      const asked = source.footageAsked.length;
+      await wait(200);
+      assert.equal(source.footageAsked.length, asked);
+      // 10 s on: asked again; the minute is there, and it plays.
+      status = 200;
+      again.at(-1)();
+      await settle();
+      assert.equal(source.footageAsked.length, asked + 1);
+      front.src = "/footage/cam-side/again.mp4";
+      front.readyState = 4;
+      front.dispatch("loadedmetadata");
+      front.dispatch("loadeddata");
+      assert.ok(plays > 0);
+      assert.ok(!texts(week).includes(WAITING));
+      assert.notEqual(clocks[0].textContent, "Live");
+      week._current.get("gV").pause();
+    } finally {
+      globalThis.setTimeout = realTimeout;
+      globalThis.fetch = realFetch;
+    }
+  });
+});
+
 test("detections that fail are not asked again for 30 s, then are", async () => {
   await withClock(async (skew) => {
     const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
