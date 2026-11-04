@@ -4042,7 +4042,8 @@ test("a camera's clock is a button that opens a date and time picker at that mom
   const week = await openVisit(source);
   const whens = allByClass(week, "button", "s-when");
   assert.equal(whens.length, 2);
-  assert.equal(whens[0].getAttribute("aria-label"), "Pick a time for Sidewalk");
+  assert.equal(whens[0].getAttribute("aria-label"), `Pick a time for Sidewalk, ${lanesOf(week).clocks[0].textContent}`);
+  assert.equal(allByClass(week, "input", "s-time")[0].getAttribute("tabindex"), "-1"); // the button is the control
   assert.ok(whens[0].querySelector("span").getAttribute("class").includes("s-clock"));
   const inputs = allByClass(week, "input", "s-time");
   assert.equal(inputs[0].getAttribute("type"), "datetime-local");
@@ -4103,7 +4104,8 @@ test("in sync, the shared clock picks a time for every camera", async () => {
   const week = await openVisit(source);
   withClass(week, "button", "s-sync").dispatch("click");
   const shared = withClass(week, "button", "s-shared-when");
-  assert.equal(shared.getAttribute("aria-label"), "Pick a time for every camera");
+  assert.equal(shared.getAttribute("aria-label"), `Pick a time for every camera, ${allByClass(week, "span", "s-big")[0].textContent}`);
+  assert.equal(withClass(week, "input", "s-shared-time").getAttribute("tabindex"), "-1");
   const input = withClass(week, "input", "s-shared-time");
   shared.dispatch("click");
   assert.equal(document.activeElement, input);
@@ -4122,6 +4124,8 @@ test("a jump to another minute keeps the picture on show until the new minute sh
   const week = await openVisit(source);
   await settle();
   const shown = lanesOf(week).videos[0];
+  let pausedOld = 0;
+  shown.pause = () => pausedOld++;
   const before = shown.src;
   const t = timeOf(week, 0);
   lanesOf(week).keys[0].dispatch("input", { target: { value: String(t - 600) } });
@@ -4136,6 +4140,7 @@ test("a jump to another minute keeps the picture on show until the new minute sh
   standby.dispatch("seeked");
   assert.equal(lanesOf(week).videos[0], standby); // now it comes forward
   assert.equal(lanesOf(week).standbys[0], shown);
+  assert.ok(pausedOld > 0); // and the one it replaced is paused
   week._current.get("gV").pause();
 });
 
@@ -4274,6 +4279,8 @@ test("a fast drag shows the timelapse at the moment's place in its ten minutes; 
   pmove(pics[0], 289, 2000); // still slow, inside the minute on show
   assert.equal(lapses[0].getAttribute("class"), "s-lapse");
   pmove(pics[0], 200, 2010); // fast: 89 px in 10 ms
+  assert.equal(lapses[0].getAttribute("class"), "s-lapse"); // not until it has found the place
+  lapses[0].dispatch("seeked");
   assert.equal(lapses[0].getAttribute("class"), "s-lapse s-on");
   const t = timeOf(week, 0);
   const block = Math.floor(t / 600) * 600;
@@ -4296,6 +4303,7 @@ test("a slow drag into a minute not loaded yet shows the timelapse until it is",
   lapses[0].duration = 120;
   lapses[0].dispatch("loadeddata");
   pmove(pics[0], 322, 2000); // slow
+  lapses[0].dispatch("seeked");
   assert.equal(lapses[0].getAttribute("class"), "s-lapse s-on");
   pup(pics[0], 322, 3000);
   week._current.get("gV").pause();
@@ -4615,5 +4623,381 @@ test("leaving Live brings back the camera's sound and Live buttons", async () =>
   lanesOf(week).keys[0].dispatch("input", { target: { value: String(Math.floor(Date.now() / 1000) - 3600) } });
   assert.equal(has(lanesOf(week).pics[0], "s-snd"), true);
   assert.equal(has(lanesOf(week).players[0], "s-golive"), true);
+  week._current.get("gV").pause();
+});
+
+// --- review: the standby, the timelapse and sound, round three -------------------------------
+test("a minute asked for and given up on is asked for again when wanted again", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const gates = [];
+  source.footageUrl = (camera, minute, quality) => new Promise((resolve) => gates.push({ camera, minute, go: () => resolve(`/footage/${camera}/${minute}-${quality}.mp4`) }));
+  const week = await openVisit(source);
+  for (const g of gates.splice(0)) g.go();
+  await settle();
+  const t = timeOf(week, 0);
+  lanesOf(week).keys[0].dispatch("input", { target: { value: String(t - 600) } }); // M0 asked, waiting
+  const pending = gates.splice(0).filter((g) => g.camera === "cam-side");
+  lanesOf(week).keys[0].dispatch("input", { target: { value: String(t) } }); // back to the minute on show
+  for (const g of pending) g.go(); // the M0 answer arrives late: no longer wanted
+  await settle();
+  lanesOf(week).keys[0].dispatch("input", { target: { value: String(t - 600) } }); // M0 again
+  await settle();
+  for (const g of gates.splice(0)) g.go();
+  await settle();
+  assert.ok(lanesOf(week).standbys[0].src, "standby never got a source: swap waits forever");
+  week._current.get("gV").pause();
+});
+
+test("the old minute ending after a jump doesn't undo the jump", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  lanesOf(week).btns[0].dispatch("click");
+  await settle();
+  const shown = lanesOf(week).videos[0];
+  shown.readyState = 1;
+  shown.currentTime = 58;
+  await wait(120);
+  const target = timeOf(week, 0) - 1800;
+  lanesOf(week).keys[0].dispatch("input", { target: { value: String(target) } });
+  await settle();
+  shown.dispatch("ended"); // the old minute runs out while the standby loads
+  await settle();
+  assert.ok(Math.abs(timeOf(week, 0) - target) < 10);
+  week._current.get("gV").pause();
+});
+
+test("stepping up in quality while playing doesn't rewind", async () => {
+  await withClock(async (skew) => {
+    const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+    const week = await openVisit(source);
+    const { pics, btns, videos } = lanesOf(week);
+    pdown(pics[0], 100, 0);
+    pup(pics[0], 100, 10);
+    btns[0].dispatch("click");
+    await settle();
+    videos[0].readyState = 1;
+    videos[0].currentTime = 20;
+    videos[0].dispatch("playing");
+    skew(6000);
+    await wait(120); // steps up to full here, clock now m+20
+    videos[0].currentTime = 24; // the low video plays on while the full one loads
+    await wait(120);
+    await settle();
+    const standby = lanesOf(week).standbys[0];
+    standby.readyState = 4;
+    standby.dispatch("loadeddata");
+    assert.ok(standby.currentTime >= 24, "rewound");
+    week._current.get("gV").pause();
+  });
+});
+
+test("a next minute whose address can't be had is not asked for every frame", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const side = Date.parse(visitDetail().visit.stops[0].time) / 1000;
+  const week = await openVisit(source);
+  lanesOf(week).btns[0].dispatch("click");
+  await settle();
+  const real = source.footageUrl;
+  source.footageUrl = async (c, m, q) => { if (m === minuteOf(side) + 60) { source.footageAsked.push([c, m, q, "fail"]); throw new Error("no"); } return real(c, m, q); };
+  const shown = lanesOf(week).videos[0];
+  shown.readyState = 1;
+  shown.currentTime = 45;
+  await wait(400);
+  const n = source.footageAsked.filter((a) => a[3] === "fail").length;
+  assert.ok(n <= 2);
+  week._current.get("gV").pause();
+});
+
+test("a still shown before the timelapse is ready goes when the timelapse shows", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), earlyInMinute())));
+  const week = await openVisit(source);
+  await settle();
+  const { pics, lapses } = lanesOf(week);
+  pdown(pics[0], 300, 0);
+  pmove(pics[0], 320, 1000); // into a minute not loaded: a still comes
+  await wait(300);
+  await settle();
+  const still = allByClass(week, "img", "s-still")[0];
+  lapses[0].duration = 120;
+  lapses[0].dispatch("loadeddata");
+  pmove(pics[0], 330, 1010);
+  lapses[0].dispatch("seeked"); // the timelapse has found its place
+  assert.equal(lapses[0].getAttribute("class"), "s-lapse s-on");
+  assert.ok(!still?.parentNode, "still should be gone while the timelapse shows");
+  pup(pics[0], 330, 2000);
+  week._current.get("gV").pause();
+});
+
+// A requestVideoFrameCallback as Chrome has it: only a callback registered before a seek runs
+// once that seek's frame is painted; one registered after (in "seeked") never does.
+function framesOf(v) {
+  let before = [];
+  v.requestVideoFrameCallback = (cb) => before.push(cb);
+  let at = 0;
+  Object.defineProperty(v, "currentTime", {
+    configurable: true,
+    get: () => at,
+    set: (value) => {
+      at = value;
+      const due = before;
+      before = [];
+      v.paint = () => due.forEach((cb) => cb());
+    },
+  });
+  v.paint = () => {};
+  return v;
+}
+
+test("the standby comes forward on the frame of its own seek, as Chrome paints it", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  await settle();
+  const shown = lanesOf(week).videos[0];
+  lanesOf(week).keys[0].dispatch("input", { target: { value: String(timeOf(week, 0) - 600) } });
+  await settle();
+  const standby = framesOf(lanesOf(week).standbys[0]);
+  standby.readyState = 4;
+  standby.dispatch("loadeddata");
+  standby.dispatch("seeked");
+  await wait(50);
+  assert.equal(lanesOf(week).videos[0], shown); // not before its frame is painted
+  standby.paint();
+  assert.equal(lanesOf(week).videos[0], standby);
+  week._current.get("gV").pause();
+});
+
+test("a standby whose frame is never reported comes forward after 300 ms anyway", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  await settle();
+  lanesOf(week).keys[0].dispatch("input", { target: { value: String(timeOf(week, 0) - 600) } });
+  await settle();
+  const standby = lanesOf(week).standbys[0];
+  standby.requestVideoFrameCallback = () => {}; // never calls back
+  standby.readyState = 4;
+  standby.dispatch("loadeddata");
+  standby.dispatch("seeked");
+  assert.notEqual(lanesOf(week).videos[0], standby);
+  await wait(350);
+  assert.equal(lanesOf(week).videos[0], standby);
+  week._current.get("gV").pause();
+});
+
+test("the timelapse of ten minutes going on now covers only what it was made from", async () => {
+  await withClock(async (skew) => {
+    const block = Math.ceil(Date.now() / 600000) * 600;
+    skew((block + 400) * 1000 - Date.now()); // 400 s into a block
+    const detail = visitDetail();
+    detail.visit.stops[0].time = new Date((block + 180) * 1000).toISOString();
+    const source = withScrub(withClips(withDetail(fakeSource(), detail)));
+    const week = await openVisit(source);
+    await settle();
+    const { pics, lapses } = lanesOf(week);
+    pdown(pics[0], 300, 0);
+    pmove(pics[0], 292, 1000);
+    await settle();
+    await settle();
+    lapses[0].duration = 120; // made from block .. block + 360 (asked at +400, 40 s settling)
+    lapses[0].dispatch("loadeddata");
+    pmove(pics[0], 200, 1010); // fast
+    lapses[0].dispatch("seeked");
+    const t = timeOf(week, 0);
+    assert.equal(lapses[0].getAttribute("class"), "s-lapse s-on");
+    assert.ok(Math.abs(lapses[0].currentTime - Math.min(120, ((t - block) / 360) * 120)) < 1.5, `${lapses[0].currentTime}`);
+    // Asked again 30 s on, the one on show stays while it is shown.
+    const src = lapses[0].src;
+    skew(31000);
+    pmove(pics[0], 150, 1020);
+    lapses[0].dispatch("seeked");
+    assert.equal(lapses[0].src, src);
+    assert.equal(lapses[0].getAttribute("class"), "s-lapse s-on");
+    pup(pics[0], 150, 2000);
+    await settle();
+    assert.equal(source.lapseAsked.filter(([, b]) => b === block).length, 2); // the newer one, once hidden
+    week._current.get("gV").pause();
+  });
+});
+
+test("while the timelapse shows, no still comes over it", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), earlyInMinute())));
+  const week = await openVisit(source);
+  await settle();
+  const { pics, lapses } = lanesOf(week);
+  pdown(pics[0], 300, 0);
+  pmove(pics[0], 320, 1000);
+  await settle();
+  await settle();
+  lapses[0].duration = 120;
+  lapses[0].dispatch("loadeddata");
+  pmove(pics[0], 322, 1010);
+  lapses[0].dispatch("seeked");
+  assert.equal(lapses[0].getAttribute("class"), "s-lapse s-on");
+  pmove(pics[0], 324, 1020);
+  await wait(250);
+  assert.equal(allByClass(week, "img", "s-still").length, 0);
+  pup(pics[0], 324, 2000);
+  week._current.get("gV").pause();
+});
+
+test("a sound tap or a Play readies the camera's videos, and a refused play goes on muted", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  await settle();
+  const shown = lanesOf(week).videos[0];
+  shown.readyState = 1;
+  lanesOf(week).btns[0].dispatch("click");
+  shown.currentTime = 45;
+  await wait(120);
+  await settle();
+  const ahead = lanesOf(week).standbys[0];
+  const calls = [];
+  ahead.play = function () {
+    calls.push(this.muted ? "muted" : "sound");
+    return this.muted ? Promise.resolve() : Promise.reject(new Error("NotAllowedError"));
+  };
+  ahead.pause = () => calls.push("pause");
+  allByClass(week, "button", "s-snd")[0].dispatch("click"); // a gesture: the standby is readied in it
+  assert.ok(calls.includes("pause") && calls.length >= 2, JSON.stringify(calls));
+  calls.length = 0;
+  ahead.readyState = 4;
+  ahead.dispatch("loadeddata");
+  shown.dispatch("ended"); // hands over; this browser refuses its sound
+  await settle();
+  await settle();
+  assert.deepEqual(calls.filter((c) => c !== "pause"), ["sound", "muted"]); // played on, muted
+  assert.equal(ahead.muted, true);
+  assert.equal(allByClass(week, "button", "s-snd")[0].getAttribute("aria-pressed"), "false");
+  week._current.get("gV").pause();
+});
+
+test("the next minute is loaded ahead at low quality, whatever is playing", async () => {
+  await withClock(async (skew) => {
+    const source = withScrub(withClips(withDetail(fakeSource(), earlyInMinute())));
+    const week = await openVisit(source);
+    const { pics, btns, videos } = lanesOf(week);
+    pdown(pics[0], 100, 0);
+    pup(pics[0], 100, 10);
+    btns[0].dispatch("click");
+    await settle();
+    videos[0].dispatch("playing");
+    skew(6000);
+    await wait(120);
+    await settle();
+    forward(week, 0); // full now on show
+    assert.equal(qualityShown(week, 0), "full");
+    const front = lanesOf(week).videos[0];
+    front.readyState = 1;
+    front.currentTime = 45;
+    await wait(120);
+    await settle();
+    assert.match(lanesOf(week).standbys[0].src, /-low\.mp4$/);
+    const next = Number.parseInt(/\/(\d+)-low\.mp4$/.exec(lanesOf(week).standbys[0].src)[1], 10);
+    const asks = () => source.footageAsked.filter(([, minute]) => minute === next).length;
+    const once = asks();
+    await wait(300);
+    assert.equal(asks(), once); // asked for once, not on every frame
+    // When it ends, the low minute ahead takes over at once, and low is what is wanted now.
+    const ahead = lanesOf(week).standbys[0];
+    ahead.readyState = 4;
+    ahead.dispatch("loadeddata");
+    front.dispatch("ended");
+    assert.equal(lanesOf(week).videos[0], ahead);
+    await wait(120);
+    await settle();
+    assert.equal(source.footageAsked.filter(([, minute, q]) => minute === next && q === "full").length, 0);
+    week._current.get("gV").pause();
+  });
+});
+
+test("no minute is loaded ahead that would be Live", async () => {
+  const detail = visitDetail();
+  detail.visit.stops[0].time = new Date(Date.now() - 110 * 1000).toISOString(); // its next minute is still being written
+  const source = withScrub(withClips(withDetail(fakeSource(), detail)));
+  const week = await openVisit(source);
+  lanesOf(week).btns[0].dispatch("click");
+  await settle();
+  const shown = lanesOf(week).videos[0];
+  shown.readyState = 1;
+  shown.currentTime = 45;
+  await wait(120);
+  await settle();
+  assert.equal(lanesOf(week).clocks[0].textContent === "Live", false);
+  assert.ok(!lanesOf(week).standbys[0].src);
+  week._current.get("gV").pause();
+});
+
+test("a camera going Live lets go of its videos and timelapse", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  await settle();
+  const { pics } = lanesOf(week);
+  pdown(pics[0], 300, 0);
+  pmove(pics[0], 290, 1000);
+  pup(pics[0], 290, 2000);
+  await settle();
+  const all = [lanesOf(week).videos[0], lanesOf(week).standbys[0], lanesOf(week).lapses[0]];
+  assert.ok(all[0].src && all[2].src);
+  allByClass(week, "button", "s-golive")[0].dispatch("click");
+  await settle();
+  assert.deepEqual(all.map((v) => v.src), ["", "", ""]);
+  week._current.get("gV").pause();
+});
+
+test("the check behind a failed minute reads only the answer's status", async () => {
+  const realFetch = globalThis.fetch;
+  let signal = null;
+  globalThis.fetch = (url, options) => {
+    if (!String(url).startsWith("/footage/")) return realFetch(url, options);
+    signal = options?.signal;
+    return Promise.resolve({ status: 404, body: { cancel() {} } });
+  };
+  try {
+    const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+    const week = await openVisit(source);
+    await settle();
+    lanesOf(week).videos[0].dispatch("error");
+    await settle();
+    await settle();
+    assert.ok(signal?.aborted);
+    week._current.get("gV").pause();
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("a timelapse address that throws at once is a miss, not a crash", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  source.timelapseUrl = () => {
+    throw new Error("nope");
+  };
+  const week = await openVisit(source);
+  const { pics } = lanesOf(week);
+  pdown(pics[0], 300, 0);
+  pmove(pics[0], 290, 1000); // asks for this block and warms the next: neither throws out
+  pup(pics[0], 290, 2000);
+  await settle();
+  week._current.get("gV").pause();
+});
+
+test("a minute that loads after all is asked for again when wanted later", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  await settle();
+  const t = timeOf(week, 0);
+  const keys = () => lanesOf(week).keys[0];
+  keys().dispatch("input", { target: { value: String(t - 600) } }); // into the standby
+  await settle();
+  const standby = lanesOf(week).standbys[0];
+  standby.dispatch("error"); // it failed...
+  await settle();
+  await settle();
+  standby.dispatch("loadeddata"); // ...and then loaded after all
+  keys().dispatch("input", { target: { value: String(t - 1200) } }); // the standby takes another minute
+  await settle();
+  const asked = source.footageAsked.filter(([, minute]) => minute === minuteOf(t - 600)).length;
+  keys().dispatch("input", { target: { value: String(t - 600) } }); // and back: asked again, not refused
+  await settle();
+  assert.equal(source.footageAsked.filter(([, minute]) => minute === minuteOf(t - 600)).length, asked + 1);
+  assert.ok(!texts(week).includes("Couldn't load this minute."));
   week._current.get("gV").pause();
 });

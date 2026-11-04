@@ -650,6 +650,7 @@ const PRELOAD_AT_S = 40; // this far into a minute that is playing, the next one
 const LAPSE_SPEED_S = 20; // a drag faster than this (seconds of footage a second) shows the timelapse
 const LAPSE_FIRST_S = 100; // a block has a timelapse once this much of it is recorded
 const LAPSE_FRESH_S = 30; // the block going on now: its timelapse is asked again after this
+const SWAP_ANYWAY_MS = 300; // a standby whose frame isn't reported comes forward after this
 const STRIP = 3; // the tape's strip is three windows wide, so most moves only slide it
 
 // The start of the minute a moment falls in: the footage it is asked for by.
@@ -806,7 +807,7 @@ function scrubView(source, alertAt, barSlot) {
   const lineUp = alertAt === null ? null : el("button", { class: "s-line", type: "button" }, "Line up at the alert");
   const sharedClock = el("span", { class: "s-big" });
   const sharedWhen = el("button", { class: "s-shared-when", type: "button", "aria-label": "Pick a time for every camera" }, sharedClock);
-  const sharedTime = el("input", { class: "s-shared-time", type: "datetime-local", step: "1", "aria-label": "Every camera: pick a time" });
+  const sharedTime = el("input", { class: "s-shared-time", type: "datetime-local", step: "1", tabindex: "-1", "aria-label": "Every camera: pick a time" });
   const sharedRel = el("span", { class: "s-sub" });
   const playAllWord = el("span", {}, "Play all");
   const playAll = el("button", { class: "s-all", type: "button", "aria-label": "Play every camera together" }, playAllWord);
@@ -841,6 +842,7 @@ function scrubView(source, alertAt, barSlot) {
     const lane = ctl.last ?? lanes[0];
     if (!ctl.sync || !lane) return;
     setText(sharedClock, lane.live ? "Live" : clockOf(lane.t));
+    sharedWhen.setAttribute("aria-label", `Pick a time for every camera, ${sharedClock.textContent}`);
     sharedClock.setAttribute("class", lane.live ? "s-big s-red" : "s-big");
     const rel = lane.live ? "every camera, now" : alertAt === null ? "" : relWords(lane.t, alertAt, "the moment the guard alerted").replace(/ (before|after)$/, " $1 the alert");
     setText(sharedRel, rel);
@@ -1061,7 +1063,7 @@ function scrubView(source, alertAt, barSlot) {
     const tape = el("div", { class: "s-tape" }, el("span", { class: "s-base" }), strip, keys, el("span", { class: "s-head" }));
     const clock = el("span", { class: "s-clock" });
     const when = el("button", { class: "s-when", type: "button", "aria-label": `Pick a time for ${name}` }, clock);
-    const timeInput = el("input", { class: "s-time", type: "datetime-local", step: "1", "aria-label": `${name}: pick a time` });
+    const timeInput = el("input", { class: "s-time", type: "datetime-local", step: "1", tabindex: "-1", "aria-label": `${name}: pick a time` });
     const rel = el("span", { class: "s-rel" });
     const goLive = el("button", { class: "s-golive", type: "button", "aria-label": `Go Live: ${name}` }, "Live");
     const read = el("div", { class: "s-read" }, when, goLive, rel, timeInput);
@@ -1089,8 +1091,23 @@ function scrubView(source, alertAt, barSlot) {
     // The front, when it holds the minute wanted; else the standby, which then comes forward.
     const seek = (dragging) => {
       if (held.get(front).key === self.key) seekTo(front, dragging);
-      else if (held.get(back).key === self.key && held.get(back).ready) seekTo(back, false);
+      else if (held.get(back).key === self.key && held.get(back).ready) bringForward();
     };
+    // The standby, holding the minute wanted, goes to the frame wanted and then forward: on
+    // the frame of that seek where the browser reports it (asked before the seek, the only
+    // way Chrome reports it), on "seeked" where it can't, and after SWAP_ANYWAY_MS at most.
+    let swapTimer = null;
+    function bringForward() {
+      const v = back;
+      const key = held.get(v).key;
+      const go = () => {
+        if (v === back && swapWhenReady && key === self.key && held.get(v).key === key) swap();
+      };
+      clearTimeout(swapTimer);
+      swapTimer = setTimeout(go, SWAP_ANYWAY_MS);
+      if (typeof v.requestVideoFrameCallback === "function") v.requestVideoFrameCallback(go);
+      seekTo(v, false);
+    }
     const showsWanted = () => held.get(front).key === self.key && front.readyState >= 2;
     // Put the videos back first in the picture, under the button and the marks.
     const restoreVideos = () => pic.replaceChildren(back, front, lapse, ...Array.from(pic.childNodes).filter((n) => n !== back && n !== front && n !== lapse));
@@ -1120,7 +1137,7 @@ function scrubView(source, alertAt, barSlot) {
       const inBack = held.get(back);
       if (inBack.key === key && !inBack.broken) {
         swapWhenReady = true;
-        if (inBack.ready) seekTo(back, false); // its seek brings it forward
+        if (inBack.ready) bringForward();
         return;
       }
       // The first minute goes straight to the front; any other loads out of sight.
@@ -1135,38 +1152,67 @@ function scrubView(source, alertAt, barSlot) {
       Object.assign(state, { key, ready: false, broken: false });
       try {
         const url = await source.footageUrl(camera, minute, quality);
-        if (!wanted() || ctl.paused || held.get(v).key !== key) return;
+        if (held.get(v).key !== key) return;
+        if (!wanted() || ctl.paused) {
+          state.key = null; // given up on: not this video's minute
+          return;
+        }
         v.src = url;
         v.load?.();
       } catch {
         if (held.get(v).key === key) state.key = null;
         if (self.key === key) miss(key);
+        else failed.set(key, now()); // a minute asked for ahead: not asked again for a while
       }
     }
     // The front gives way to the standby, which shows the frame wanted.
     function swap() {
+      clearTimeout(swapTimer);
       const old = front;
       front = back;
       back = old;
       swapWhenReady = false;
+      self.steady = null; // steady again once this one says it is playing
       front.setAttribute("class", "s-video s-front");
       back.setAttribute("class", "s-video s-standby");
       self.applySound(); // the sound goes with the minute on show
       old.pause?.();
-      if (self.playing) front.play?.()?.catch?.(() => {});
+      if (self.playing) playFront();
       show(still, pic, false);
     }
+    // Play what is on show; a browser that refuses its sound (no gesture behind this video)
+    // plays it muted, and the sound button goes off, rather than leave it stopped.
+    function playFront() {
+      const v = front;
+      v.play?.()?.catch?.(() => {
+        if (v !== front || !self.playing || v.muted) return;
+        v.muted = true;
+        if (ctl.heard === self) hear(null);
+        v.play?.()?.catch?.(() => {});
+      });
+    }
+    // In a gesture (a tap on sound or Play): play and pause each video with a minute, so the
+    // browser lets it play later with sound, after a swap.
+    self.prime = () => {
+      for (const v of [front, back]) {
+        if (!v.src || v === front) continue;
+        v.muted = ctl.heard !== self;
+        v.play?.()?.catch?.(() => {});
+        v.pause?.();
+        v.muted = true;
+      }
+    };
     // The next minute, loaded out of sight while this one plays.
     function preloadNext() {
       const loaded = Number.parseInt(held.get(front).key ?? "", 10);
       if (!Number.isFinite(loaded) || swapWhenReady) return;
       const next = loaded + 60;
-      const key = `${next}-${self.quality}`;
+      const key = `${next}-low`; // ahead at low quality: full comes when it is steady
       const ahead = held.get(back);
       if ((ahead.key === key && !ahead.broken) || isLive(next, now())) return; // a broken one is tried again
       const missed = failed.get(key);
       if (missed !== undefined && now() - missed < RETRY_S) return;
-      fill(back, next, self.quality, () => true);
+      fill(back, next, "low", () => true);
     }
     function miss(key) {
       failed.set(key, now());
@@ -1192,7 +1238,7 @@ function scrubView(source, alertAt, barSlot) {
           say("");
           readyForTicks();
         } else if (swapWhenReady && state.key === self.key) {
-          seekTo(v, false); // to the frame wanted; its "seeked" brings it forward
+          bringForward(); // to the frame wanted, then forward
         }
       });
       v.addEventListener("seeked", () => {
@@ -1202,14 +1248,8 @@ function scrubView(source, alertAt, barSlot) {
         }
         const state = held.get(v);
         if (!swapWhenReady || !state.ready || state.key !== self.key) return;
-        // Forward once that frame is on screen (where the browser can say so).
-        if (typeof v.requestVideoFrameCallback === "function") {
-          v.requestVideoFrameCallback(() => {
-            if (v === back && swapWhenReady && held.get(v).key === self.key) swap();
-          });
-        } else {
-          swap();
-        }
+        // A browser that reports frames brings it forward on that report (bringForward).
+        if (typeof v.requestVideoFrameCallback !== "function") swap();
       });
       v.addEventListener("playing", () => {
         if (!isFront()) return;
@@ -1234,13 +1274,13 @@ function scrubView(source, alertAt, barSlot) {
       v.addEventListener("ended", () => {
         // The next minute: at once from the standby when it has it, else loaded; Live once
         // there is no more.
-        if (!isFront() || !self.playing) return;
+        if (!isFront() || !self.playing || held.get(v).key !== self.key) return; // not after a jump
         const loaded = Number.parseInt(held.get(v).key ?? "", 10); // the minute that ended
         self.t = (Number.isFinite(loaded) ? loaded : minuteOf(self.t)) + 60;
-        const key = `${minuteOf(self.t)}-${self.quality}`;
         const ahead = held.get(back);
-        if (ahead.key === key && ahead.ready && !isLive(self.t, now())) {
-          self.key = key;
+        if (ahead.ready && !ahead.broken && Number.parseInt(ahead.key ?? "", 10) === minuteOf(self.t) && !isLive(self.t, now())) {
+          self.key = ahead.key;
+          self.quality = ahead.key.endsWith("-full") ? "full" : "low"; // as loaded ahead
           back.currentTime = 0;
           swap();
         }
@@ -1259,10 +1299,13 @@ function scrubView(source, alertAt, barSlot) {
           return;
         }
         let status = 0;
+        const check = typeof AbortController === "function" ? new AbortController() : null;
         try {
-          if (typeof fetch === "function" && v.src) status = (await fetch(v.src, { headers: { Range: "bytes=0-0" } })).status;
+          if (typeof fetch === "function" && v.src) status = (await fetch(v.src, { headers: { Range: "bytes=0-0" }, signal: check?.signal })).status;
         } catch {
           /* no answer: counted as a miss */
+        } finally {
+          check?.abort(); // the status was all it was for
         }
         if (self.key !== key || ctl.paused) return;
         if (status === 425) {
@@ -1284,6 +1327,8 @@ function scrubView(source, alertAt, barSlot) {
       if (!lapseOk(block)) return;
       const growing = block + TICK_BLOCK_S > now();
       if (lapseState.block === block && !(growing && now() - lapseState.at >= LAPSE_FRESH_S)) return;
+      // A newer one of the same block waits while the one on show is shown.
+      if (lapseState.block === block && lapseState.on) return;
       const missed = lapseState.failed.get(block);
       if (missed !== undefined && now() - missed < RETRY_S) return;
       Object.assign(lapseState, { block, ready: false, at: now() });
@@ -1305,7 +1350,8 @@ function scrubView(source, alertAt, barSlot) {
     function warmLapse(block) {
       if (!lapseOk(block) || lapseState.warmed.has(block) || typeof fetch !== "function") return;
       lapseState.warmed.add(block);
-      Promise.resolve(source.timelapseUrl(camera, block))
+      Promise.resolve()
+        .then(() => source.timelapseUrl(camera, block))
         .then((url) => fetch(url, { headers: { Range: "bytes=0-0" } }))
         .then((answer) => answer.body?.cancel?.())
         .catch(() => lapseState.warmed.delete(block));
@@ -1313,13 +1359,19 @@ function scrubView(source, alertAt, barSlot) {
     lapse.addEventListener("loadeddata", () => {
       if (lapseState.block !== null) lapseState.ready = true;
     });
+    // Shown only once it has found the place asked for.
+    lapse.addEventListener("seeked", () => {
+      if (lapseState.want) showLapse(true);
+    });
     lapse.addEventListener("error", () => {
       if (lapseState.block !== null) lapseFailed(lapseState.block);
     });
     function showLapse(on) {
+      if (!on) lapseState.want = false;
       if (lapseState.on === on) return;
       lapseState.on = on;
       lapse.setAttribute("class", on ? "s-lapse s-on" : "s-lapse");
+      if (on) show(still, pic, false); // nothing over it
     }
     // While dragging: the timelapse when the drag is fast, or the minute isn't there yet.
     function drawLapse(dragging) {
@@ -1327,12 +1379,17 @@ function scrubView(source, alertAt, barSlot) {
       const fast = (self.speed ?? 0) > LAPSE_SPEED_S;
       const on = dragging && lapseState.ready && lapseState.block === block && (fast || !showsWanted());
       if (on) {
-        const at = ((self.t - block) / TICK_BLOCK_S) * (lapse.duration || 0);
+        // A block still going on was made from its start to 40 s before it was asked for.
+        const span = Math.max(1, Math.min(TICK_BLOCK_S, lapseState.at - SETTLE_S + 5 - block));
+        const at = Math.min(1, (self.t - block) / span) * (lapse.duration || 0);
         if (typeof lapse.fastSeek === "function") lapse.fastSeek(at);
         else lapse.currentTime = at;
+        lapseState.want = true; // shown once sought ("seeked")
+      } else {
+        showLapse(false);
       }
-      showLapse(on);
       if (dragging) wantLapse(block);
+      else if (lapseState.block !== null) wantLapse(lapseState.block); // a newer one held back while shown
     }
     // A drag begins: this block's timelapse, and the next one in the drag's direction.
     self.startLapse = (direction) => {
@@ -1451,6 +1508,15 @@ function scrubView(source, alertAt, barSlot) {
       if (on) {
         front.pause?.();
         for (const v of [front, back, lapse, snd]) show(v, pic, false);
+        for (const v of [front, back, lapse]) {
+          v.removeAttribute("src"); // nothing held open while Live
+          v.load?.();
+        }
+        for (const state of held.values()) Object.assign(state, { key: null, ready: false, broken: false });
+        Object.assign(lapseState, { block: null, ready: false });
+        showLapse(false);
+        swapWhenReady = false;
+        self.key = null;
         show(still, pic, false);
         say("");
         self.openLive(false);
@@ -1466,6 +1532,7 @@ function scrubView(source, alertAt, barSlot) {
       if (self.live) goLive.remove();
       else if (goLive.parentNode !== read) read.insertBefore?.(goLive, rel) ?? read.append(goLive);
       setText(clock, dead ? clockOf(liveSince ?? self.t) : self.live ? "Live" : clockOf(self.t));
+      when.setAttribute("aria-label", `Pick a time for ${name}, ${clock.textContent}`);
       clock.setAttribute("class", self.live && !dead ? "s-clock s-red" : "s-clock");
       setText(rel, dead ? "Live stopped" : self.live ? "now" : relWords(self.t, self.anchor, self.added ? "when added" : "when they got here"));
       keys.max = String(Math.floor(now()));
@@ -1533,9 +1600,11 @@ function scrubView(source, alertAt, barSlot) {
     // once playback has been steady a while. Live redraws once a second.
     let drawnAt = 0;
     self.tick = () => {
-      if (self.playing && !self.live && self.key !== null && held.get(front).key === self.key && front.readyState >= 1) {
-        // Within the minute loaded: its end belongs to "ended", which goes on to the next.
-        self.t = Number.parseInt(self.key, 10) + Math.min(59.9, front.currentTime || 0);
+      const shownMinute = Number.parseInt(held.get(front).key ?? "", 10);
+      if (self.playing && !self.live && self.key !== null && shownMinute === Number.parseInt(self.key, 10) && front.readyState >= 1) {
+        // The minute on show, at whatever quality, while another may load: its end belongs
+        // to "ended", which goes on to the next.
+        self.t = shownMinute + Math.min(59.9, front.currentTime || 0);
       }
       const after = stalls ? Math.min(STALL_MAX_S, STALL_STEP_S * 2 ** (stalls - 1)) : FULL_AFTER_S;
       if (self.full && self.playing && !self.live && self.quality === "low" && self.steady !== null && now() - self.steady >= after) {
@@ -1556,9 +1625,10 @@ function scrubView(source, alertAt, barSlot) {
       btn.setAttribute("aria-label", `Pause ${name}`);
       player.setAttribute("class", playerClass());
       self.applySound();
+      self.prime();
       if (!self.live && !ctl.paused) {
         load();
-        front.play?.()?.catch?.(() => {});
+        playFront();
       }
       run();
     };
@@ -1622,6 +1692,7 @@ function scrubView(source, alertAt, barSlot) {
     snd.addEventListener("click", () => {
       touch();
       hear(ctl.heard === self ? null : self);
+      self.prime(); // in the tap: its videos may play with sound later
     });
     goLive.addEventListener("click", () => {
       touch();
