@@ -27,7 +27,9 @@
 // for clipUrl is its position in `stops`. `trial` (true or false, when the engine says) is
 // whether it was a trial alert; without it a story title starting "Trial:" counts as one. A detail without `visit` is shown as it always was.
 // A source may also have clipUrl(id, stop) -> Promise<url>, the recording around one stop
-// (video/mp4): without it the visit view has no play buttons. And liveUrl(camera) -> url, where
+// (video/mp4): without it the visit view has no play buttons. With them, timelapseUrl(camera,
+// block) -> Promise<url> may give a ten-minute block's timelapse (block: the epoch second it
+// starts on, a multiple of 600), shown while a drag outruns the footage. And liveUrl(camera) -> url, where
 // the "Watch live" button goes (default: unifi-protect://protect/devices/<camera>).
 // A source may also have, all five together, footage for a camera through time (the engine's
 // page does): footageUrl(camera, minute, quality) -> Promise<url>, one minute of video/mp4
@@ -147,6 +149,8 @@ const STYLE = `
   .s-pic { position: relative; aspect-ratio: 16 / 9; overflow: hidden; border-radius: 6px; background: #37474F; touch-action: pan-y; user-select: none; -webkit-user-select: none; cursor: grab; }
   .s-pic video, .s-pic img { position: absolute; inset: 0; display: block; width: 100%; height: 100%; object-fit: cover; }
   .s-pic img { -webkit-user-drag: none; user-select: none; }
+  .s-pic .s-standby, .s-pic .s-lapse { visibility: hidden; }
+  .s-pic .s-lapse.s-on { visibility: visible; }
   .s-hint { position: absolute; left: 50%; top: 50%; z-index: 1; transform: translate(-50%, -50%); min-height: 36px; padding: 0 14px; border-radius: 18px; background: rgba(0, 0, 0, .6); border: 0; color: #fff; font: inherit; font-size: 13px; white-space: nowrap; cursor: pointer; }
   .s-note { position: absolute; right: 6px; bottom: 6px; z-index: 1; padding: 2px 6px; border-radius: 6px; background: rgba(0, 0, 0, .55); color: #fff; font-size: 11px; }
   .v-clip, .v-clip-slot { position: relative; }
@@ -638,7 +642,10 @@ const LIVE_QUIET_MS = 5000; // a Live stream that sends no picture this long has
 const STALL_STEP_S = 30; // after a stall, steady playback this long before full quality again,
 const STALL_MAX_S = 120; // doubling with each stall, up to this
 const TICKS_AFTER_MS = 1500; // detections wait for the first picture, or this long
-const PREFETCH_BYTES = 65535; // the next minute's first bytes: enough for the engine to fetch it
+const PRELOAD_AT_S = 40; // this far into a minute that is playing, the next one loads out of sight
+const LAPSE_SPEED_S = 20; // a drag faster than this (seconds of footage a second) shows the timelapse
+const LAPSE_FIRST_S = 100; // a block has a timelapse once this much of it is recorded
+const LAPSE_FRESH_S = 30; // the block going on now: its timelapse is asked again after this
 const STRIP = 3; // the tape's strip is three windows wide, so most moves only slide it
 
 // The start of the minute a moment falls in: the footage it is asked for by.
@@ -999,9 +1006,27 @@ function scrubView(source, alertAt, barSlot) {
   function lane({ camera, place, anchor, added }) {
     const name = place || "Camera";
     const self = { camera, place, anchor, added: added === true, t: anchor, follow: false, playing: false, live: false, liveState: null, full: false, quality: "low", key: null, steady: null, visible: true, ticksReady: false };
-    const video = el("video", { class: "s-video", playsinline: true, muted: true, preload: "auto", "aria-label": `${name} footage` });
-    video.muted = true;
-    video.playsInline = true;
+    const makeVideo = (cls, label) => {
+      const v = el("video", { class: cls, playsinline: true, muted: true, preload: "auto", "aria-label": label });
+      v.muted = true;
+      v.playsInline = true;
+      return v;
+    };
+    // Two videos: the front is shown; the standby loads the next minute, or the minute a seek
+    // lands in, out of sight, and comes to the front only once it shows the frame wanted, so
+    // there is never a grey gap between minutes.
+    let front = makeVideo("s-video s-front", `${name} footage`);
+    let back = makeVideo("s-video s-standby", `${name} footage`);
+    const held = new Map([
+      [front, { key: null, ready: false, broken: false }],
+      [back, { key: null, ready: false, broken: false }],
+    ]);
+    let swapWhenReady = false; // the standby holds the minute wanted: to the front once it shows it
+    // The ten-minute timelapse, shown while a drag outruns the footage.
+    const lapse = el("video", { class: "s-lapse", playsinline: true, muted: true, preload: "auto", "aria-hidden": "true" });
+    lapse.muted = true;
+    lapse.playsInline = true;
+    const lapseState = { block: null, ready: false, at: 0, failed: new Map(), warmed: new Set(), on: false };
     const still = el("img", { class: "s-still", alt: "", draggable: "false" });
     const liveImg = el("img", { class: "s-live", alt: `${name}, live`, draggable: "false" });
     const liveMark = el("span", { class: "s-mark" }, "Live");
@@ -1009,7 +1034,7 @@ function scrubView(source, alertAt, barSlot) {
     const note = el("span", { class: "s-note" });
     const glyph = el("span", { class: "s-tri" });
     const btn = el("button", { class: "s-btn", type: "button", "aria-label": `Play ${name}` }, el("span", { class: "s-disc" }, glyph));
-    const pic = el("div", { class: "s-pic" }, video, btn);
+    const pic = el("div", { class: "s-pic" }, back, front, lapse, btn);
     const strip = el("div", { class: "s-strip" });
     const future = el("span", { class: "s-future" });
     const keys = el("input", { class: "s-key", type: "range", step: "5", min: "0", "aria-label": `${name}: move through time` });
@@ -1023,24 +1048,30 @@ function scrubView(source, alertAt, barSlot) {
     let stillTimer = null;
     let deadTimer = null;
     let ticksTimer = null;
-    let fetched = null; // the next minute, asked for ahead
     let liveSince = null; // when the stream last showed a picture
     let liveToken = 0;
     let liveAbort = null; // closes the stream being read
     let livePicture = null; // the object URL shown, let go when the next one comes
     let stalls = 0; // full quality stalled this often: it waits longer each time
-    let srcKey = null; // the minute the video's source is
     let stripKey = null;
     let centre = null;
     const redrawTicks = () => self.drawTape(true);
 
     const playerClass = () => `s-player${self.full ? " s-full" : ""}${self.playing ? " s-playing" : ""}`;
     const offset = () => Math.min(59.9, Math.max(0, self.t - minuteOf(self.t)));
-    const seek = (dragging) => {
-      if (!(video.readyState >= 1)) return;
-      if (dragging && typeof video.fastSeek === "function") video.fastSeek(offset());
-      else video.currentTime = offset();
+    const seekTo = (v, dragging) => {
+      if (!(v.readyState >= 1)) return;
+      if (dragging && typeof v.fastSeek === "function") v.fastSeek(offset());
+      else v.currentTime = offset();
     };
+    // The front, when it holds the minute wanted; else the standby, which then comes forward.
+    const seek = (dragging) => {
+      if (held.get(front).key === self.key) seekTo(front, dragging);
+      else if (held.get(back).key === self.key && held.get(back).ready) seekTo(back, false);
+    };
+    const showsWanted = () => held.get(front).key === self.key && front.readyState >= 2;
+    // Put the videos back first in the picture, under the button and the marks.
+    const restoreVideos = () => pic.replaceChildren(back, front, lapse, ...Array.from(pic.childNodes).filter((n) => n !== back && n !== front && n !== lapse));
     const say = (words) => {
       setText(note, words || "");
       show(note, pic, Boolean(words));
@@ -1059,79 +1090,240 @@ function scrubView(source, alertAt, barSlot) {
       }
       self.key = key;
       say("");
+      const inFront = held.get(front);
+      if (inFront.key === key && !inFront.broken) {
+        swapWhenReady = false; // back where the front already is
+        return;
+      }
+      const inBack = held.get(back);
+      if (inBack.key === key && !inBack.broken) {
+        swapWhenReady = true;
+        if (inBack.ready) seekTo(back, false); // its seek brings it forward
+        return;
+      }
+      // The first minute goes straight to the front; any other loads out of sight.
+      const into = inFront.key === null || inFront.broken ? front : back;
+      swapWhenReady = into === back;
+      await fill(into, minute, self.quality, () => self.key === key);
+    }
+    // Give a video a minute's footage, unless it is no longer wanted when the address comes.
+    async function fill(v, minute, quality, wanted) {
+      const key = `${minute}-${quality}`;
+      const state = held.get(v);
+      Object.assign(state, { key, ready: false, broken: false });
       try {
-        const url = await source.footageUrl(camera, minute, self.quality);
-        if (self.key !== key || ctl.paused) return;
-        srcKey = key;
-        video.src = url;
-        video.load?.();
+        const url = await source.footageUrl(camera, minute, quality);
+        if (!wanted() || ctl.paused || held.get(v).key !== key) return;
+        v.src = url;
+        v.load?.();
       } catch {
+        if (held.get(v).key === key) state.key = null;
         if (self.key === key) miss(key);
       }
+    }
+    // The front gives way to the standby, which shows the frame wanted.
+    function swap() {
+      const old = front;
+      front = back;
+      back = old;
+      swapWhenReady = false;
+      front.setAttribute("class", "s-video s-front");
+      back.setAttribute("class", "s-video s-standby");
+      front.muted = old.muted;
+      old.muted = true;
+      old.pause?.();
+      if (self.playing) front.play?.()?.catch?.(() => {});
+      show(still, pic, false);
+    }
+    // The next minute, loaded out of sight while this one plays.
+    function preloadNext() {
+      const loaded = Number.parseInt(held.get(front).key ?? "", 10);
+      if (!Number.isFinite(loaded) || swapWhenReady) return;
+      const next = loaded + 60;
+      const key = `${next}-${self.quality}`;
+      const ahead = held.get(back);
+      if ((ahead.key === key && !ahead.broken) || isLive(next, now())) return; // a broken one is tried again
+      const missed = failed.get(key);
+      if (missed !== undefined && now() - missed < RETRY_S) return;
+      fill(back, next, self.quality, () => true);
     }
     function miss(key) {
       failed.set(key, now());
       if (self.key === key) self.key = null;
       self.steady = null;
+      swapWhenReady = false;
       say("Couldn't load this minute.");
     }
-    video.addEventListener("loadedmetadata", () => {
-      seek(false);
-      if (self.playing) video.play?.()?.catch?.(() => {});
-    });
-    video.addEventListener("loadeddata", () => {
-      if (srcKey !== null) failed.delete(srcKey); // it loaded after all
-      say("");
-      readyForTicks();
-    });
-    video.addEventListener("seeked", () => show(still, pic, false));
-    video.addEventListener("playing", () => {
-      self.steady = now();
-      show(still, pic, false);
-      say("");
-    });
-    video.addEventListener("waiting", () => {
-      self.steady = null;
-      // Not keeping up at full quality: back to low, from where it was, and longer before
-      // trying full again.
-      if (self.quality === "full") {
-        stalls++;
-        self.quality = "low";
+    // Each video's events: the front's run the player; the standby's bring it forward.
+    for (const v of [front, back]) {
+      const isFront = () => v === front;
+      v.addEventListener("loadedmetadata", () => {
+        if (!isFront()) return;
+        seek(false);
+        if (self.playing) v.play?.()?.catch?.(() => {});
+      });
+      v.addEventListener("loadeddata", () => {
+        const state = held.get(v);
+        state.ready = true;
+        state.broken = false;
+        if (state.key !== null) failed.delete(state.key); // it loaded after all
+        if (isFront()) {
+          say("");
+          readyForTicks();
+        } else if (swapWhenReady && state.key === self.key) {
+          seekTo(v, false); // to the frame wanted; its "seeked" brings it forward
+        }
+      });
+      v.addEventListener("seeked", () => {
+        if (isFront()) {
+          show(still, pic, false);
+          return;
+        }
+        const state = held.get(v);
+        if (!swapWhenReady || !state.ready || state.key !== self.key) return;
+        // Forward once that frame is on screen (where the browser can say so).
+        if (typeof v.requestVideoFrameCallback === "function") {
+          v.requestVideoFrameCallback(() => {
+            if (v === back && swapWhenReady && held.get(v).key === self.key) swap();
+          });
+        } else {
+          swap();
+        }
+      });
+      v.addEventListener("playing", () => {
+        if (!isFront()) return;
+        self.steady = now();
+        show(still, pic, false);
+        say("");
+      });
+      v.addEventListener("waiting", () => {
+        if (!isFront()) return;
+        self.steady = null;
+        // Not keeping up at full quality: back to low, from where it was, and longer before
+        // trying full again.
+        if (self.quality === "full") {
+          stalls++;
+          self.quality = "low";
+          self.draw(false);
+        }
+      });
+      v.addEventListener("seeking", () => {
+        if (isFront()) self.steady = null;
+      });
+      v.addEventListener("ended", () => {
+        // The next minute: at once from the standby when it has it, else loaded; Live once
+        // there is no more.
+        if (!isFront() || !self.playing) return;
+        const loaded = Number.parseInt(held.get(v).key ?? "", 10); // the minute that ended
+        self.t = (Number.isFinite(loaded) ? loaded : minuteOf(self.t)) + 60;
+        const key = `${minuteOf(self.t)}-${self.quality}`;
+        const ahead = held.get(back);
+        if (ahead.key === key && ahead.ready && !isLive(self.t, now())) {
+          self.key = key;
+          back.currentTime = 0;
+          swap();
+        }
         self.draw(false);
-      }
-    });
-    video.addEventListener("seeking", () => (self.steady = null));
-    video.addEventListener("ended", () => {
-      // The next minute, or Live once there is no more.
-      if (!self.playing) return;
-      const loaded = Number.parseInt(self.key ?? "", 10); // the minute that ended
-      self.t = (Number.isFinite(loaded) ? loaded : minuteOf(self.t)) + 60;
-      self.draw(false);
-    });
-    // A minute that fails: a 425 means Protect is still writing it (Live, then); anything
-    // else waits RETRY_S.
-    video.addEventListener("error", async () => {
-      const key = self.key;
-      if (key === null || ctl.paused) return;
-      let status = 0;
+      });
+      // A minute that fails: a 425 means Protect is still writing it (Live, then); anything
+      // else waits RETRY_S. A minute loading ahead that fails is let go quietly.
+      v.addEventListener("error", async () => {
+        const state = held.get(v);
+        const key = state.key;
+        if (key === null || ctl.paused) return;
+        state.broken = true;
+        state.ready = false;
+        if (key !== self.key) {
+          failed.set(key, now());
+          return;
+        }
+        let status = 0;
+        try {
+          if (typeof fetch === "function" && v.src) status = (await fetch(v.src, { headers: { Range: "bytes=0-0" } })).status;
+        } catch {
+          /* no answer: counted as a miss */
+        }
+        if (self.key !== key || ctl.paused) return;
+        if (status === 425) {
+          self.key = null;
+          self.follow = true;
+          self.draw(false);
+          return;
+        }
+        miss(key);
+      });
+    }
+
+    // The timelapse of a ten-minute block, for a drag that outruns the footage; the block next
+    // to it, in the drag's direction, is asked for ahead so the engine has it.
+    // A block has one once a minute or so of it is recorded (the engine says 425 before); the
+    // one going on now grows, so it is asked again every LAPSE_FRESH_S.
+    const lapseOk = (block) => typeof source.timelapseUrl === "function" && block <= now() - LAPSE_FIRST_S;
+    async function wantLapse(block) {
+      if (!lapseOk(block)) return;
+      const growing = block + TICK_BLOCK_S > now();
+      if (lapseState.block === block && !(growing && now() - lapseState.at >= LAPSE_FRESH_S)) return;
+      const missed = lapseState.failed.get(block);
+      if (missed !== undefined && now() - missed < RETRY_S) return;
+      Object.assign(lapseState, { block, ready: false, at: now() });
       try {
-        if (typeof fetch === "function" && video.src) status = (await fetch(video.src, { headers: { Range: "bytes=0-0" } })).status;
+        const url = await source.timelapseUrl(camera, block);
+        if (lapseState.block !== block || ctl.paused) return;
+        lapse.src = url;
+        lapse.load?.();
       } catch {
-        /* no answer: counted as a miss */
+        if (lapseState.block === block) lapseFailed(block);
       }
-      if (self.key !== key || ctl.paused) return;
-      if (status === 425) {
-        self.key = null;
-        self.follow = true;
-        self.draw(false);
-        return;
-      }
-      miss(key);
+    }
+    function lapseFailed(block) {
+      lapseState.failed.set(block, now());
+      lapseState.block = null;
+      lapseState.ready = false;
+      showLapse(false);
+    }
+    function warmLapse(block) {
+      if (!lapseOk(block) || lapseState.warmed.has(block) || typeof fetch !== "function") return;
+      lapseState.warmed.add(block);
+      Promise.resolve(source.timelapseUrl(camera, block))
+        .then((url) => fetch(url, { headers: { Range: "bytes=0-0" } }))
+        .then((answer) => answer.body?.cancel?.())
+        .catch(() => lapseState.warmed.delete(block));
+    }
+    lapse.addEventListener("loadeddata", () => {
+      if (lapseState.block !== null) lapseState.ready = true;
     });
+    lapse.addEventListener("error", () => {
+      if (lapseState.block !== null) lapseFailed(lapseState.block);
+    });
+    function showLapse(on) {
+      if (lapseState.on === on) return;
+      lapseState.on = on;
+      lapse.setAttribute("class", on ? "s-lapse s-on" : "s-lapse");
+    }
+    // While dragging: the timelapse when the drag is fast, or the minute isn't there yet.
+    function drawLapse(dragging) {
+      const block = Math.floor(self.t / TICK_BLOCK_S) * TICK_BLOCK_S;
+      const fast = (self.speed ?? 0) > LAPSE_SPEED_S;
+      const on = dragging && lapseState.ready && lapseState.block === block && (fast || !showsWanted());
+      if (on) {
+        const at = ((self.t - block) / TICK_BLOCK_S) * (lapse.duration || 0);
+        if (typeof lapse.fastSeek === "function") lapse.fastSeek(at);
+        else lapse.currentTime = at;
+      }
+      showLapse(on);
+      if (dragging) wantLapse(block);
+    }
+    // A drag begins: this block's timelapse, and the next one in the drag's direction.
+    self.startLapse = (direction) => {
+      const block = Math.floor(self.t / TICK_BLOCK_S) * TICK_BLOCK_S;
+      wantLapse(block);
+      if (direction) warmLapse(block + Math.sign(direction) * TICK_BLOCK_S);
+    };
+
     const wantStill = () => {
       clearTimeout(stillTimer);
       stillTimer = setTimeout(async () => {
-        if (self.live || video.readyState >= 2 || ctl.paused) return;
+        if (self.live || showsWanted() || lapseState.on || ctl.paused) return;
         try {
           const url = await source.frameUrl(camera, Math.floor(self.t));
           if (self.live || ctl.paused) return;
@@ -1236,15 +1428,14 @@ function scrubView(source, alertAt, barSlot) {
       if (on === self.live) return;
       self.live = on;
       if (on) {
-        video.pause?.();
-        show(video, pic, false);
+        front.pause?.();
+        for (const v of [front, back, lapse]) show(v, pic, false);
         show(still, pic, false);
         say("");
         self.openLive(false);
       } else {
         self.closeLive(null);
-        // The video goes back first, under the button and the marks.
-        pic.replaceChildren(video, ...Array.from(pic.childNodes).filter((n) => n !== video));
+        restoreVideos();
       }
     }
 
@@ -1307,29 +1498,20 @@ function scrubView(source, alertAt, barSlot) {
         if (dragging || !self.playing) seek(dragging); // playing, the video is where it plays
         if (dragging) wantStill();
       }
+      drawLapse(dragging && !isNow);
       self.drawTape(false);
       self.drawRead();
-      // The next minute's first bytes, asked for ahead so the engine has it fetched when
-      // playback gets there (low quality only: full is fetched when wanted).
-      if (!isNow && self.playing && self.quality === "low" && offset() > 40 && typeof fetch === "function") {
-        const next = minuteOf(self.t) + 60;
-        if (fetched !== next && !isLive(next, n)) {
-          fetched = next;
-          Promise.resolve(source.footageUrl(camera, next, "low"))
-            .then((url) => fetch(url, { headers: { Range: `bytes=0-${PREFETCH_BYTES}` } }))
-            .then((answer) => answer.body?.cancel?.())
-            .catch(() => {});
-        }
-      }
+      // Playing on in a minute: the next one loads out of sight.
+      if (!isNow && self.playing && offset() > PRELOAD_AT_S) preloadNext();
     };
 
     // While playing, time comes from the video; the full-width camera steps up in quality
     // once playback has been steady a while. Live redraws once a second.
     let drawnAt = 0;
     self.tick = () => {
-      if (self.playing && !self.live && self.key !== null && self.key === srcKey && video.readyState >= 1) {
+      if (self.playing && !self.live && self.key !== null && held.get(front).key === self.key && front.readyState >= 1) {
         // Within the minute loaded: its end belongs to "ended", which goes on to the next.
-        self.t = Number.parseInt(self.key, 10) + Math.min(59.9, video.currentTime || 0);
+        self.t = Number.parseInt(self.key, 10) + Math.min(59.9, front.currentTime || 0);
       }
       const after = stalls ? Math.min(STALL_MAX_S, STALL_STEP_S * 2 ** (stalls - 1)) : FULL_AFTER_S;
       if (self.full && self.playing && !self.live && self.quality === "low" && self.steady !== null && now() - self.steady >= after) {
@@ -1349,18 +1531,18 @@ function scrubView(source, alertAt, barSlot) {
       glyph.setAttribute("class", "s-bars");
       btn.setAttribute("aria-label", `Pause ${name}`);
       player.setAttribute("class", playerClass());
-      video.muted = ctl.last !== self; // sound only from the camera last touched
+      front.muted = ctl.last !== self; // sound only from the camera last touched
       if (!self.live && !ctl.paused) {
         load();
-        video.play?.()?.catch?.(() => {});
+        front.play?.()?.catch?.(() => {});
       }
       run();
     };
     self.pause = () => {
       self.playing = false;
       self.steady = null;
-      video.pause?.();
-      video.muted = true;
+      front.pause?.();
+      front.muted = true;
       glyph.setAttribute("class", "s-tri");
       btn.setAttribute("aria-label", `Play ${name}`);
       player.setAttribute("class", playerClass());
@@ -1370,14 +1552,19 @@ function scrubView(source, alertAt, barSlot) {
       self.pause();
       clearTimeout(stillTimer);
       clearTimeout(ticksTimer);
-      video.removeAttribute("src"); // nothing held open: asked for again on waking
-      video.load?.();
+      for (const v of [front, back, lapse]) {
+        v.removeAttribute("src"); // nothing held open: asked for again on waking
+        v.load?.();
+      }
+      for (const state of held.values()) Object.assign(state, { key: null, ready: false, broken: false });
+      Object.assign(lapseState, { block: null, ready: false });
+      showLapse(false);
+      swapWhenReady = false;
       self.key = null;
-      srcKey = null;
       if (self.live) {
         self.live = false;
         self.closeLive(null);
-        pic.replaceChildren(video, ...Array.from(pic.childNodes).filter((n) => n !== video));
+        restoreVideos();
       }
     };
     self.wake = () => {
@@ -1456,6 +1643,7 @@ function scrubView(source, alertAt, barSlot) {
           for (const l of ctl.sync ? lanes : [self]) {
             l.pause();
             if (l.quality === "full") l.quality = "low"; // scrubbing is at low quality
+            l.startLapse(-dx); // left is forward in time
           }
           ctl.playAll = false;
         }
@@ -1464,6 +1652,7 @@ function scrubView(source, alertAt, barSlot) {
         held.vel = (-(event.clientX - held.lastX) * held.spp) / Math.max(1, at - held.lastAt);
         held.lastX = event.clientX;
         held.lastAt = at;
+        for (const l of ctl.sync ? lanes : [self]) l.speed = Math.abs(held.vel) * 1000; // footage seconds a second
         move(self, held.t0 - dx * held.spp, true);
       });
       area.addEventListener("pointerup", (event) => {
@@ -1471,6 +1660,7 @@ function scrubView(source, alertAt, barSlot) {
         release();
         if (!was) return;
         touch();
+        for (const l of lanes) l.speed = 0;
         if (!was.moved) {
           if (onPicture && !was.stoppedGlide) self.setFull(!self.full); // a tap; not one that stopped a glide
           return;
@@ -1487,6 +1677,7 @@ function scrubView(source, alertAt, barSlot) {
       area.addEventListener("pointercancel", () => {
         const was = held;
         release();
+        for (const l of lanes) l.speed = 0;
         ctl.vel = 0;
         ctl.glider = null;
         if (was) for (const l of ctl.sync ? lanes : [self]) l.draw(false);

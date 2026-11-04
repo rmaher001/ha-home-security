@@ -2348,6 +2348,11 @@ function withScrub(source, cameras = [
   };
   source.cameras = async () => cameras;
   source.liveStreamUrl = async (camera) => `/live/${camera}`;
+  source.lapseAsked = [];
+  source.timelapseUrl = async (camera, block) => {
+    source.lapseAsked.push([camera, block]);
+    return `/timelapse/${camera}/${block}.mp4`;
+  };
   return source;
 }
 
@@ -2494,9 +2499,20 @@ const lanesOf = (week) => ({
   keys: allByClass(week, "input", "s-key"),
   clocks: allByClass(week, "span", "s-clock"),
   btns: allByClass(week, "button", "s-btn"),
-  videos: allByClass(week, "video", "s-video"),
+  videos: allByClass(week, "video", "s-front"), // each camera's video on show
+  standbys: allByClass(week, "video", "s-standby"),
+  lapses: allByClass(week, "video", "s-lapse"),
 });
 const timeOf = (week, i) => Number(lanesOf(week).keys[i].value);
+// The standby of camera i has its frame: it comes to the front (as the browser would say).
+function forward(week, i) {
+  const standby = lanesOf(week).standbys[i];
+  if (!standby?.src) return;
+  standby.readyState = 4;
+  standby.dispatch("loadeddata");
+  standby.dispatch("seeked");
+}
+const qualityShown = (week, i) => /-(low|full)\.mp4$/.exec(lanesOf(week).videos[i].src || "")?.[1];
 const recentDetail = (seconds = 20) => {
   const detail = visitDetail();
   detail.visit.stops[0].time = new Date(Date.now() - seconds * 1000).toISOString();
@@ -2883,18 +2899,18 @@ test("Live opens the stream, closes it when scrubbed back, and comes back after 
   const img = liveShown(block)[0];
   assert.match(img.src, /^blob:/);
   const stream = liveStreams.at(-1);
-  assert.ok(lanesOf(week).pics[0].childNodes.every((n) => n.getAttribute("class") !== "s-video"));
+  assert.ok(lanesOf(week).pics[0].childNodes.every((n) => !(n.getAttribute("class") || "").includes("s-video")));
   lanesOf(week).keys[0].dispatch("input", { target: { value: String(Math.floor(Date.now() / 1000) - 3600) } });
   assert.equal(liveShown(block).length, 0);
   assert.equal(img.src, ""); // the picture is gone
   assert.equal(stream.aborted, true); // and the stream closed
-  assert.equal(lanesOf(week).pics[0].childNodes[0].getAttribute("class"), "s-video");
+  assert.ok(lanesOf(week).pics[0].childNodes.slice(0, 2).some((n) => n.getAttribute("class") === "s-video s-front"));
   lanesOf(week).keys[0].dispatch("input", { target: { value: String(Math.floor(Date.now() / 1000) + 60) } });
   await settle();
   assert.equal(liveShown(block).length, 1);
   block.pause();
   assert.equal(liveShown(block).length, 0);
-  assert.equal(lanesOf(week).pics[0].childNodes[0].getAttribute("class"), "s-video");
+  assert.ok(lanesOf(week).pics[0].childNodes.slice(0, 2).some((n) => n.getAttribute("class") === "s-video s-front"));
   await withClock(async (skew) => {
     skew(10 * 60 * 1000);
     block.resume();
@@ -2937,11 +2953,13 @@ test("a camera that plays into Live keeps following now", async () => {
     detail.visit.stops[0].time = new Date(Date.now() - 150 * 1000).toISOString();
     const source = withScrub(withClips(withDetail(fakeSource(), detail)));
     const week = await openVisit(source);
-    const { btns, videos, clocks } = lanesOf(week);
+    const { btns, clocks } = lanesOf(week);
     btns[0].dispatch("click");
-    videos[0].dispatch("ended");
-    videos[0].dispatch("ended");
-    await settle();
+    for (let i = 0; i < 3 && clocks[0].textContent !== "Live"; i++) {
+      lanesOf(week).videos[0].dispatch("ended"); // a minute ends; the next comes forward
+      await settle();
+      forward(week, 0);
+    }
     assert.equal(clocks[0].textContent, "Live");
     skew(120000);
     await wait(150);
@@ -3060,35 +3078,35 @@ test("at full width and playing steadily for 5 s, a camera steps up to full qual
     skew(6000);
     await wait(120);
     assert.equal(source.footageAsked.at(-1)[2], "full");
+    await settle();
+    forward(week, 0);
+    assert.equal(qualityShown(week, 0), "full");
     pdown(pics[0], 300, 1000);
-    pmove(pics[0], 200, 1010);
-    pup(pics[0], 200, 2000);
-    assert.equal(source.footageAsked.at(-1)[2], "low");
+    pmove(pics[0], 290, 1010); // a small drag: the same minute, at low quality again
+    pup(pics[0], 290, 2000);
+    forward(week, 0);
+    assert.equal(qualityShown(week, 0), "low");
     week._current.get("gV").pause();
   });
 });
 
-test("the next minute is asked for ahead, its first bytes only", async () => {
-  const realFetch = globalThis.fetch;
-  const asked = [];
-  globalThis.fetch = async (url, options) => (asked.push([url, options?.headers?.Range]), { status: 206, body: { cancel() {} } });
-  try {
-    const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
-    const week = await openVisit(source);
-    const { btns, videos } = lanesOf(week);
-    btns[0].dispatch("click");
-    await settle();
-    videos[0].readyState = 1;
-    videos[0].currentTime = 45;
-    await wait(120);
-    await settle();
-    assert.equal(asked.length, 1);
-    assert.match(asked[0][0], /-low\.mp4$/);
-    assert.equal(asked[0][1], "bytes=0-65535");
-    week._current.get("gV").pause();
-  } finally {
-    globalThis.fetch = realFetch;
-  }
+test("past 40 s into a minute that is playing, the next one loads out of sight", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  const { btns, videos, standbys } = lanesOf(week);
+  const side = Date.parse(visitDetail().visit.stops[0].time) / 1000;
+  btns[0].dispatch("click");
+  await settle();
+  videos[0].readyState = 1;
+  videos[0].currentTime = 10;
+  await wait(120);
+  assert.ok(!standbys[0].src);
+  videos[0].currentTime = 45;
+  await wait(120);
+  await settle();
+  assert.equal(standbys[0].src, `/footage/cam-side/${minuteOf(side) + 60}-low.mp4`);
+  assert.equal(lanesOf(week).videos[0], videos[0]); // still on show
+  week._current.get("gV").pause();
 });
 
 test("at most three Live streams are open; the others offer one, and taking it keeps three", async () => {
@@ -3289,7 +3307,9 @@ test("a minute that arrives after the camera moved on is not put in", async () =
   gates[0](); // the old one last of all
   await settle();
   const minute = minuteOf(timeOf(week, 0));
-  assert.match(lanesOf(week).videos[0].src, new RegExp(`/${minute}-low\\.mp4$`));
+  const srcs = [lanesOf(week).videos[0].src, lanesOf(week).standbys[0].src];
+  assert.ok(srcs.some((src) => new RegExp(`/${minute}-low\\.mp4$`).test(src || "")), JSON.stringify(srcs));
+  assert.equal(srcs.filter((src) => src && !new RegExp(`/${minute}-low\\.mp4$`).test(src)).length, 0);
   week._current.get("gV").pause();
 });
 
@@ -3319,8 +3339,10 @@ test("only the full-width camera steps up, and only after 5 s of steady playback
     skew(4000);
     await wait(120);
     assert.equal(source.footageAsked.at(-1)[2], "full");
-    videos[0].dispatch("waiting"); // stalls at full: back to low
-    assert.equal(source.footageAsked.at(-1)[2], "low");
+    lanesOf(week).videos[0].dispatch("waiting"); // stalls before full comes: low stays
+    await settle();
+    forward(week, 0);
+    assert.equal(qualityShown(week, 0), "low");
     week._current.get("gV").pause();
   });
 });
@@ -3606,24 +3628,33 @@ test("after a stall, full quality waits 30 s of steady playback, doubling each s
     pup(pics[0], 100, 10);
     btns[0].dispatch("click");
     await settle();
+    // Steady playback for so long, then whatever came forward: the quality on show.
     const stepUp = async (seconds) => {
-      videos[0].dispatch("playing");
+      lanesOf(week).videos[0].dispatch("playing");
       skew(seconds * 1000);
       await wait(120);
-      return source.footageAsked.at(-1)[2];
+      await settle();
+      forward(week, 0);
+      return qualityShown(week, 0);
+    };
+    const stall = async () => {
+      lanesOf(week).videos[0].dispatch("waiting");
+      await settle();
+      forward(week, 0);
     };
     assert.equal(await stepUp(6), "full");
-    videos[0].dispatch("waiting"); // a stall: low again
+    await stall(); // low again
+    assert.equal(qualityShown(week, 0), "low");
     assert.equal(await stepUp(20), "low");
     assert.equal(await stepUp(31), "full");
-    videos[0].dispatch("waiting");
+    await stall();
     assert.equal(await stepUp(50), "low");
     assert.equal(await stepUp(61), "full");
     for (let i = 0; i < 4; i++) {
-      videos[0].dispatch("waiting");
+      await stall();
       await stepUp(200);
     }
-    videos[0].dispatch("waiting");
+    await stall();
     assert.equal(await stepUp(121), "full"); // never more than 2 min
     week._current.get("gV").pause();
   });
@@ -3715,10 +3746,8 @@ test("a minute that loads after all is no longer kept as failed", async () => {
   videos[0].dispatch("loadeddata"); // it came after all
   keys[0].dispatch("input", { target: { value: String(t - 600) } });
   await settle();
-  const asked = source.footageAsked.length;
   keys[0].dispatch("input", { target: { value: String(t) } }); // back, well within 30 s
   await settle();
-  assert.ok(source.footageAsked.length > asked);
   assert.ok(!texts(week).includes("Couldn't load this minute."));
   week._current.get("gV").pause();
 });
@@ -3924,8 +3953,17 @@ test("opening a row again picks its cameras up where they were", async () => {
   block.pause();
 });
 
+// A visit whose stops sit early in a minute, so a short drag stays inside it.
+function earlyInMinute() {
+  const detail = visitDetail();
+  const m = minuteOf(Date.now() / 1000) - 600;
+  detail.visit.stops[0].time = new Date((m + 5) * 1000).toISOString();
+  detail.visit.stops[1].time = new Date((m + 8) * 1000).toISOString();
+  return detail;
+}
+
 test("letting go after a drag in sync puts every camera on its exact frame", async () => {
-  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const source = withScrub(withClips(withDetail(fakeSource(), earlyInMinute())));
   const week = await openVisit(source);
   withClass(week, "button", "s-sync").dispatch("click");
   const { tapes, videos } = lanesOf(week);
@@ -4075,5 +4113,369 @@ test("in sync, the shared clock picks a time for every camera", async () => {
   input.dispatch("change", { target: input });
   assert.equal(timeOf(week, 0), Math.round(target / 5) * 5);
   assert.equal(timeOf(week, 1), Math.round(target / 5) * 5);
+  week._current.get("gV").pause();
+});
+
+// --- no grey between minutes, and a timelapse while scrubbing fast ----------------------------
+
+test("a jump to another minute keeps the picture on show until the new minute shows its frame", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  await settle();
+  const shown = lanesOf(week).videos[0];
+  const before = shown.src;
+  const t = timeOf(week, 0);
+  lanesOf(week).keys[0].dispatch("input", { target: { value: String(t - 600) } });
+  await settle();
+  assert.equal(lanesOf(week).videos[0], shown); // still on show
+  assert.equal(shown.src, before);
+  const standby = lanesOf(week).standbys[0];
+  assert.match(standby.src, new RegExp(`/${minuteOf(t - 600)}-low\\.mp4$`));
+  standby.readyState = 4;
+  standby.dispatch("loadeddata");
+  assert.equal(lanesOf(week).videos[0], shown); // loaded, but not yet at the frame
+  standby.dispatch("seeked");
+  assert.equal(lanesOf(week).videos[0], standby); // now it comes forward
+  assert.equal(lanesOf(week).standbys[0], shown);
+  week._current.get("gV").pause();
+});
+
+test("where the browser can say a frame is on screen, the swap waits for that", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  await settle();
+  const shown = lanesOf(week).videos[0];
+  lanesOf(week).keys[0].dispatch("input", { target: { value: String(timeOf(week, 0) - 600) } });
+  await settle();
+  const standby = lanesOf(week).standbys[0];
+  let painted = null;
+  standby.requestVideoFrameCallback = (cb) => (painted = cb);
+  standby.readyState = 4;
+  standby.dispatch("loadeddata");
+  standby.dispatch("seeked");
+  assert.equal(lanesOf(week).videos[0], shown);
+  painted();
+  assert.equal(lanesOf(week).videos[0], standby);
+  week._current.get("gV").pause();
+});
+
+test("a minute that ends while playing hands over at once to the one loaded ahead", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  const side = Date.parse(visitDetail().visit.stops[0].time) / 1000;
+  lanesOf(week).btns[0].dispatch("click");
+  await settle();
+  const shown = lanesOf(week).videos[0];
+  shown.readyState = 1;
+  shown.currentTime = 45;
+  await wait(120);
+  await settle();
+  const ahead = lanesOf(week).standbys[0];
+  let played = 0;
+  ahead.play = () => (played++, Promise.resolve());
+  ahead.readyState = 4;
+  ahead.dispatch("loadeddata"); // ready, out of sight
+  assert.equal(lanesOf(week).videos[0], shown);
+  shown.dispatch("ended");
+  assert.equal(lanesOf(week).videos[0], ahead);
+  assert.equal(played, 1);
+  assert.match(ahead.src, new RegExp(`/${minuteOf(side) + 60}-low\\.mp4$`));
+  week._current.get("gV").pause();
+});
+
+test("going back to the minute on show asks for nothing and swaps nothing", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  await settle();
+  const shown = lanesOf(week).videos[0];
+  const t = timeOf(week, 0);
+  lanesOf(week).keys[0].dispatch("input", { target: { value: String(t - 600) } });
+  await settle();
+  const asked = source.footageAsked.length;
+  lanesOf(week).keys[0].dispatch("input", { target: { value: String(t) } });
+  await settle();
+  assert.equal(source.footageAsked.length, asked);
+  forward(week, 0);
+  assert.equal(lanesOf(week).videos[0], shown);
+  week._current.get("gV").pause();
+});
+
+test("a minute loading ahead that fails is let go quietly, and not asked again for 30 s", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  const side = Date.parse(visitDetail().visit.stops[0].time) / 1000;
+  lanesOf(week).btns[0].dispatch("click");
+  await settle();
+  const shown = lanesOf(week).videos[0];
+  shown.readyState = 1;
+  shown.currentTime = 45;
+  await wait(120);
+  await settle();
+  lanesOf(week).standbys[0].dispatch("error");
+  await settle();
+  assert.ok(!texts(week).includes("Couldn't load this minute."));
+  const asked = source.footageAsked.filter(([, minute]) => minute === minuteOf(side) + 60).length;
+  await wait(200);
+  assert.equal(source.footageAsked.filter(([, minute]) => minute === minuteOf(side) + 60).length, asked);
+  week._current.get("gV").pause();
+});
+
+test("asleep, a camera lets go of both its videos and its timelapse", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  await settle();
+  lanesOf(week).keys[0].dispatch("input", { target: { value: String(timeOf(week, 0) - 600) } });
+  const { pics } = lanesOf(week);
+  pdown(pics[0], 300, 0);
+  pmove(pics[0], 250, 10);
+  pup(pics[0], 250, 1000);
+  await settle();
+  assert.ok(lanesOf(week).standbys[0].src && lanesOf(week).lapses[0].src);
+  week._current.get("gV").pause();
+  const { videos, standbys, lapses } = lanesOf(week);
+  assert.deepEqual([videos[0].src, standbys[0].src, lapses[0].src], ["", "", ""]);
+});
+
+test("a drag asks for its ten minutes' timelapse, and the next ten in its direction ahead", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  const block = Math.floor(timeOf(week, 0) / 600) * 600;
+  fetched = [];
+  const { pics } = lanesOf(week);
+  pdown(pics[0], 300, 0);
+  pmove(pics[0], 290, 1000); // left: forward in time
+  await settle();
+  await settle();
+  assert.deepEqual(source.lapseAsked[0], ["cam-side", block]);
+  assert.match(lanesOf(week).lapses[0].src, new RegExp(`/timelapse/cam-side/${block}\\.mp4$`));
+  const warmed = fetched.filter(([url]) => String(url).startsWith("/timelapse/"));
+  assert.deepEqual(warmed.map(([url, o]) => [url, o?.headers?.Range]), [[`/timelapse/cam-side/${block + 600}.mp4`, "bytes=0-0"]]);
+  pup(pics[0], 290, 2000);
+  pdown(pics[0], 300, 3000);
+  pmove(pics[0], 310, 4000); // right: back in time
+  await settle();
+  await settle();
+  assert.ok(fetched.some(([url]) => url === `/timelapse/cam-side/${block - 600}.mp4`));
+  pup(pics[0], 310, 5000);
+  week._current.get("gV").pause();
+});
+
+test("a fast drag shows the timelapse at the moment's place in its ten minutes; letting go hides it", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), earlyInMinute())));
+  const week = await openVisit(source);
+  await settle();
+  const { pics, lapses, videos } = lanesOf(week);
+  videos[0].readyState = 4; // the minute itself is there
+  pdown(pics[0], 300, 0);
+  pmove(pics[0], 292, 1000); // slow, to start
+  await settle();
+  await settle();
+  lapses[0].duration = 120;
+  lapses[0].dispatch("loadeddata");
+  pmove(pics[0], 289, 2000); // still slow, inside the minute on show
+  assert.equal(lapses[0].getAttribute("class"), "s-lapse");
+  pmove(pics[0], 200, 2010); // fast: 89 px in 10 ms
+  assert.equal(lapses[0].getAttribute("class"), "s-lapse s-on");
+  const t = timeOf(week, 0);
+  const block = Math.floor(t / 600) * 600;
+  assert.ok(Math.abs(lapses[0].currentTime - ((t - block) / 600) * 120) < 1.5);
+  pup(pics[0], 200, 3000);
+  assert.equal(lapses[0].getAttribute("class"), "s-lapse");
+  week._current.get("gV").pause();
+});
+
+test("a slow drag into a minute not loaded yet shows the timelapse until it is", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), earlyInMinute())));
+  const week = await openVisit(source);
+  await settle();
+  const { pics, lapses, videos } = lanesOf(week);
+  videos[0].readyState = 4;
+  pdown(pics[0], 300, 0);
+  pmove(pics[0], 320, 1000); // 8 s back: into the minute before, not loaded
+  await settle();
+  await settle();
+  lapses[0].duration = 120;
+  lapses[0].dispatch("loadeddata");
+  pmove(pics[0], 322, 2000); // slow
+  assert.equal(lapses[0].getAttribute("class"), "s-lapse s-on");
+  pup(pics[0], 322, 3000);
+  week._current.get("gV").pause();
+});
+
+test("a timelapse that can't be had waits 30 s; a source without them drags as before", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  const { pics, lapses } = lanesOf(week);
+  pdown(pics[0], 300, 0);
+  pmove(pics[0], 290, 1000);
+  await settle();
+  await settle();
+  lapses[0].dispatch("error"); // a 425: no timelapse yet
+  const asked = source.lapseAsked.length;
+  pmove(pics[0], 280, 2000);
+  await settle();
+  assert.equal(source.lapseAsked.length, asked);
+  pup(pics[0], 280, 3000);
+  week._current.get("gV").pause();
+
+  const plain = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  delete plain.timelapseUrl;
+  const other = await openVisit(plain);
+  const t0 = timeOf(other, 0);
+  pdown(lanesOf(other).pics[0], 300, 0);
+  pmove(lanesOf(other).pics[0], 250, 1000);
+  pup(lanesOf(other).pics[0], 250, 2000);
+  assert.equal(timeOf(other, 0) - t0, 20);
+  assert.equal(allByClass(other, "video", "s-lapse")[0].getAttribute("class"), "s-lapse");
+  other._current.get("gV").pause();
+});
+
+test("the ten minutes going on now: no timelapse in its first 100 s, asked again every 30 s after", async () => {
+  await withClock(async (skew) => {
+    const block = Math.ceil(Date.now() / 600000) * 600;
+    skew((block + 50) * 1000 - Date.now()); // 50 s into a block
+    const detail = visitDetail();
+    detail.visit.stops[0].time = new Date((block - 300) * 1000).toISOString(); // in the block before
+    const source = withScrub(withClips(withDetail(fakeSource(), detail)));
+    const week = await openVisit(source);
+    fetched = [];
+    const { pics } = lanesOf(week);
+    pdown(pics[0], 300, 0);
+    pmove(pics[0], 290, 1000); // forward: the next block is the one going on now
+    await settle();
+    await settle();
+    assert.ok(!fetched.some(([url]) => url === `/timelapse/cam-side/${block}.mp4`));
+    pup(pics[0], 290, 2000);
+    // Later in the block, a camera inside it: its timelapse, and again 30 s on.
+    skew(250 * 1000); // 300 s into the block
+    lanesOf(week).keys[0].dispatch("input", { target: { value: String(block + 100) } });
+    pdown(pics[0], 300, 3000);
+    pmove(pics[0], 310, 4000);
+    await settle();
+    const count = () => source.lapseAsked.filter(([, b]) => b === block).length;
+    assert.equal(count(), 1);
+    pmove(pics[0], 312, 5000);
+    await settle();
+    assert.equal(count(), 1);
+    skew(31000);
+    pmove(pics[0], 314, 6000);
+    await settle();
+    assert.equal(count(), 2);
+    pup(pics[0], 314, 7000);
+    week._current.get("gV").pause();
+  });
+});
+
+test("a jump to the minute already loaded ahead takes it from there, sought, with no new ask", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), earlyInMinute())));
+  const week = await openVisit(source);
+  const side = Math.round(Date.parse(earlyInMinute().visit.stops[0].time) / 1000);
+  lanesOf(week).btns[0].dispatch("click");
+  await settle();
+  const shown = lanesOf(week).videos[0];
+  shown.readyState = 1;
+  shown.currentTime = 45;
+  await wait(120);
+  await settle();
+  const ahead = lanesOf(week).standbys[0];
+  ahead.readyState = 4;
+  ahead.dispatch("loadeddata");
+  lanesOf(week).btns[0].dispatch("click"); // paused
+  const asked = source.footageAsked.length;
+  const next = minuteOf(side) + 60;
+  lanesOf(week).keys[0].dispatch("input", { target: { value: String(next + 10) } });
+  await settle();
+  assert.equal(source.footageAsked.length, asked); // nothing asked again
+  assert.equal(ahead.currentTime, 10); // sought to the frame
+  lanesOf(week).keys[0].dispatch("input", { target: { value: String(next + 20) } });
+  assert.equal(ahead.currentTime, 20); // and kept there while it comes forward
+  ahead.dispatch("seeked");
+  assert.equal(lanesOf(week).videos[0], ahead);
+  week._current.get("gV").pause();
+});
+
+test("the camera's sound goes with the minute that comes forward", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  lanesOf(week).btns[0].dispatch("click"); // played, so heard
+  await settle();
+  const shown = lanesOf(week).videos[0];
+  assert.equal(shown.muted, false);
+  shown.readyState = 1;
+  shown.currentTime = 45;
+  await wait(120);
+  await settle();
+  const ahead = lanesOf(week).standbys[0];
+  ahead.readyState = 4;
+  ahead.dispatch("loadeddata");
+  shown.dispatch("ended");
+  assert.equal(ahead.muted, false);
+  assert.equal(shown.muted, true);
+  week._current.get("gV").pause();
+});
+
+test("a minute that ends hands over only to one that has loaded", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  lanesOf(week).btns[0].dispatch("click");
+  await settle();
+  const shown = lanesOf(week).videos[0];
+  shown.readyState = 1;
+  shown.currentTime = 45;
+  await wait(120);
+  await settle();
+  shown.dispatch("ended"); // the next minute is asked for, but hasn't loaded
+  assert.equal(lanesOf(week).videos[0], shown);
+  week._current.get("gV").pause();
+});
+
+test("a minute loading ahead that failed is tried again after 30 s", async () => {
+  await withClock(async (skew) => {
+    const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+    const week = await openVisit(source);
+    const side = Date.parse(visitDetail().visit.stops[0].time) / 1000;
+    lanesOf(week).btns[0].dispatch("click");
+    await settle();
+    const shown = lanesOf(week).videos[0];
+    shown.readyState = 1;
+    shown.currentTime = 45;
+    await wait(120);
+    await settle();
+    lanesOf(week).standbys[0].dispatch("error");
+    const count = () => source.footageAsked.filter(([, minute]) => minute === minuteOf(side) + 60).length;
+    const asked = count();
+    await wait(150);
+    assert.equal(count(), asked);
+    skew(31000);
+    await wait(150);
+    assert.equal(count(), asked + 1);
+    week._current.get("gV").pause();
+  });
+});
+
+test("no still while dragging over a minute that is already on show", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), earlyInMinute())));
+  const week = await openVisit(source);
+  await settle();
+  const { pics, videos } = lanesOf(week);
+  videos[0].readyState = 4;
+  pdown(pics[0], 300, 0);
+  pmove(pics[0], 290, 1000); // 4 s on, the same minute
+  await wait(200);
+  assert.equal(allByClass(week, "img", "s-still").length, 0);
+  pup(pics[0], 290, 2000);
+  week._current.get("gV").pause();
+});
+
+test("a time that isn't a date and time in full is not picked", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  const input = allByClass(week, "input", "s-time")[0];
+  const before = timeOf(week, 0);
+  for (const junk of ["2026", "2026-11-03", "11/03/2026 8:00", "2026-11-03T08"]) {
+    input.value = junk;
+    input.dispatch("change", { target: input });
+    assert.equal(timeOf(week, 0), before, junk);
+  }
   week._current.get("gV").pause();
 });
