@@ -841,19 +841,23 @@ function scrubView(source, alertAt, barSlot) {
     show(shared, bar, ctl.sync);
     const lane = ctl.last ?? lanes[0];
     if (!ctl.sync || !lane) return;
-    setText(sharedClock, lane.live ? "Live" : clockOf(lane.t));
+    const liveNow = lane.live && !lane.frozen; // a paused Live camera holds a moment
+    setText(sharedClock, liveNow ? "Live" : clockOf(lane.t));
     sharedWhen.setAttribute("aria-label", `Pick a time for every camera, ${sharedClock.textContent}`);
-    sharedClock.setAttribute("class", lane.live ? "s-big s-red" : "s-big");
-    const rel = lane.live ? "every camera, now" : alertAt === null ? "" : relWords(lane.t, alertAt, "the moment the guard alerted").replace(/ (before|after)$/, " $1 the alert");
+    sharedClock.setAttribute("class", liveNow ? "s-big s-red" : "s-big");
+    const rel = liveNow ? "every camera, now" : lane.frozen ? "Paused" : alertAt === null ? "" : relWords(lane.t, alertAt, "the moment the guard alerted").replace(/ (before|after)$/, " $1 the alert");
     setText(sharedRel, rel);
-    setText(playAllWord, ctl.playAll ? "Pause" : "Play all");
-    if (lane.live) allLive.remove(); // already Live: no need
+    const going = ctl.playAll || lanes.some((l) => l.going()); // Live cameras go by themselves
+    setText(playAllWord, going ? "Pause" : "Play all");
+    if (liveNow) allLive.remove(); // already Live: no need
     else if (allLive.parentNode !== sharedButtons) sharedButtons.replaceChildren(allLive, playAll);
-    playAll.setAttribute("aria-label", ctl.playAll ? "Pause every camera" : "Play every camera together");
+    playAll.setAttribute("aria-label", going ? "Pause every camera" : "Play every camera together");
   };
 
   // The owner is doing something: a newer version of the visit waits until 3 s after.
-  const busy = () => ctl.held > 0 || ctl.vel !== 0 || lanes.some((lane) => lane.playing);
+  // A recording playing counts (Live just goes on), and so does a paused Live camera on show:
+  // a newer version would let go of its picture.
+  const busy = () => ctl.held > 0 || ctl.vel !== 0 || lanes.some((lane) => (lane.playing && !lane.live) || (lane.frozen && !ctl.paused));
   const idle = () => !busy() && Date.now() - ctl.active >= IDLE_MS;
   // A newer version is waiting (ctl.onIdle): look again once the cameras could be idle, and
   // again after that for as long as they are in use.
@@ -874,7 +878,7 @@ function scrubView(source, alertAt, barSlot) {
     ctl.active = Date.now();
     watchIdle();
   };
-  const needsFrames = () => ctl.vel !== 0 || lanes.some((lane) => lane.playing || lane.live);
+  const needsFrames = () => ctl.vel !== 0 || lanes.some((lane) => lane.playing || (lane.live && !lane.frozen));
   const run = () => {
     if (ctl.paused || ctl.timer || !needsFrames()) return;
     ctl.timer = setInterval(frame, FRAME_MS);
@@ -908,6 +912,7 @@ function scrubView(source, alertAt, barSlot) {
     const times = syncTimes(lanes.map((l) => l.t), lanes.indexOf(lane), t, ctl.sync);
     lanes.forEach((l, i) => {
       if (times[i] === l.t && l !== lane) return;
+      if (times[i] !== l.t) l.unfreeze(); // taken elsewhere; one left where it is stays paused
       l.t = times[i];
       l.follow = false; // where it was taken; draw() says whether that is Live
       l.draw(dragging);
@@ -936,14 +941,20 @@ function scrubView(source, alertAt, barSlot) {
     ctl.heard = lane;
     for (const l of lanes) l.applySound();
   }
-  function setPlayAll(on) {
+  // `hold`: Pause was asked for, so a Live camera holds its picture too.
+  function setPlayAll(on, hold = false) {
     ctl.playAll = on;
-    for (const lane of lanes) (on ? lane.play() : lane.pause());
+    ctl.holdingAll = !on && hold; // a slot freed now is for no one: they all pause
+    try {
+      for (const lane of lanes) (on ? lane.play() : lane.pause(hold));
+    } finally {
+      ctl.holdingAll = false;
+    }
     drawBar();
   }
   playAll.addEventListener("click", () => {
     touch();
-    setPlayAll(!ctl.playAll);
+    setPlayAll(!(ctl.playAll || lanes.some((l) => l.going())), true);
   });
 
   // Live streams: at most LIVE_MAX open, cameras on screen first. A camera without one shows
@@ -965,7 +976,7 @@ function scrubView(source, alertAt, barSlot) {
     return true;
   }
   function freeLive(lane) {
-    if (!live.delete(lane) || evicting) return;
+    if (!live.delete(lane) || evicting || ctl.holdingAll) return;
     const next = lanes.find((l) => l.live && l.liveState === "waiting" && l.visible) ?? lanes.find((l) => l.live && l.liveState === "waiting");
     if (next && !ctl.paused) next.openLive(false);
   }
@@ -1026,7 +1037,7 @@ function scrubView(source, alertAt, barSlot) {
   // One camera's player. `anchor` is its stop's moment (for one added: when it was added).
   function lane({ camera, place, anchor, added }) {
     const name = place || "Camera";
-    const self = { camera, place, anchor, added: added === true, t: anchor, follow: false, playing: false, live: false, liveState: null, full: false, quality: "low", key: null, steady: null, visible: true, ticksReady: false };
+    const self = { camera, place, anchor, added: added === true, t: anchor, follow: false, playing: false, live: false, liveState: null, frozen: false, full: false, quality: "low", key: null, steady: null, visible: true, ticksReady: false };
     const makeVideo = (cls, label) => {
       const v = el("video", { class: cls, playsinline: true, muted: true, preload: "auto", "aria-label": label });
       v.muted = true;
@@ -1081,7 +1092,14 @@ function scrubView(source, alertAt, barSlot) {
     let centre = null;
     const redrawTicks = () => self.drawTape(true);
 
-    const playerClass = () => `s-player${self.full ? " s-full" : ""}${self.playing ? " s-playing" : ""}`;
+    // Going: playing, or Live and not paused. Its button says Pause and fades.
+    const going = (self.going = () => self.playing || (self.live && !self.frozen));
+    const playerClass = () => `s-player${self.full ? " s-full" : ""}${going() ? " s-playing" : ""}`;
+    const drawButton = () => {
+      glyph.setAttribute("class", going() ? "s-bars" : "s-tri");
+      btn.setAttribute("aria-label", `${going() ? "Pause" : "Play"} ${name}`);
+      player.setAttribute("class", playerClass());
+    };
     const offset = () => Math.min(59.9, Math.max(0, self.t - minuteOf(self.t)));
     const seekTo = (v, dragging) => {
       if (!(v.readyState >= 1)) return;
@@ -1421,7 +1439,7 @@ function scrubView(source, alertAt, barSlot) {
 
     // Live: the stream, while it has a slot and keeps showing pictures.
     self.openLive = async (force) => {
-      if (!self.live || ctl.paused) return;
+      if (!self.live || ctl.paused || self.frozen) return;
       if (!grantLive(self, force)) {
         self.closeLive("waiting");
         return;
@@ -1497,9 +1515,41 @@ function scrubView(source, alertAt, barSlot) {
       show(hint, pic, state !== null);
       self.drawRead();
     };
+    // Paused while Live: the stream closes and its last picture stays, until Play or a move.
+    // One with no picture yet (waiting for a stream, opening, stopped) holds now, and offers Live.
+    self.holdLive = () => {
+      const shown = self.liveState === "open";
+      self.frozen = true;
+      self.follow = false;
+      self.t = shown && liveSince !== null ? liveSince : now();
+      liveToken++;
+      clearTimeout(deadTimer);
+      liveAbort?.abort();
+      liveAbort = null;
+      show(liveMark, pic, false);
+      if (!shown) {
+        liveImg.removeAttribute("src");
+        if (livePicture) URL.revokeObjectURL(livePicture);
+        livePicture = null;
+        liveSince = null; // the clock says the moment it was paused
+        show(liveImg, pic, false);
+        setText(hint, "Paused. Tap for Live");
+      }
+      show(hint, pic, !shown);
+      freeLive(self);
+      self.liveState = "frozen";
+      drawButton();
+      self.drawRead();
+    };
+    self.unfreeze = () => {
+      if (!self.frozen) return;
+      self.frozen = false;
+      setLive(false); // what draw() finds next: Live again, or the recording
+    };
     hint.addEventListener("pointerdown", (event) => event.stopPropagation());
     hint.addEventListener("click", () => {
       touch();
+      if (self.frozen) return self.play(); // paused: Live again
       self.openLive(true);
     });
     function setLive(on) {
@@ -1519,25 +1569,28 @@ function scrubView(source, alertAt, barSlot) {
         self.key = null;
         show(still, pic, false);
         say("");
+        liveSince = null; // no picture yet in this Live
         self.openLive(false);
       } else {
         self.closeLive(null);
         restoreVideos();
         show(snd, pic, true);
       }
+      drawButton();
     }
 
     self.drawRead = () => {
       const dead = self.live && self.liveState === "dead";
-      if (self.live) goLive.remove();
+      const holding = self.live && self.frozen;
+      if (self.live && !holding) goLive.remove();
       else if (goLive.parentNode !== read) read.insertBefore?.(goLive, rel) ?? read.append(goLive);
-      setText(clock, dead ? clockOf(liveSince ?? self.t) : self.live ? "Live" : clockOf(self.t));
+      setText(clock, dead || holding ? clockOf(liveSince ?? self.t) : self.live ? "Live" : clockOf(self.t));
       when.setAttribute("aria-label", `Pick a time for ${name}, ${clock.textContent}`);
-      clock.setAttribute("class", self.live && !dead ? "s-clock s-red" : "s-clock");
-      setText(rel, dead ? "Live stopped" : self.live ? "now" : relWords(self.t, self.anchor, self.added ? "when added" : "when they got here"));
+      clock.setAttribute("class", self.live && !dead && !holding ? "s-clock s-red" : "s-clock");
+      setText(rel, dead ? "Live stopped" : holding ? "Paused" : self.live ? "now" : relWords(self.t, self.anchor, self.added ? "when added" : "when they got here"));
       keys.max = String(Math.floor(now()));
       keys.value = String(Math.round(self.t / 5) * 5);
-      keys.setAttribute("aria-valuetext", self.live ? "Live" : clockOf(self.t));
+      keys.setAttribute("aria-valuetext", self.live && !holding ? "Live" : clockOf(self.t));
     };
 
     // The tape: a strip three windows wide, built around a centre and slid under the line;
@@ -1577,6 +1630,11 @@ function scrubView(source, alertAt, barSlot) {
     self.draw = (dragging) => {
       if (ctl.paused) return;
       const n = now();
+      if (self.frozen) {
+        self.drawTape(false); // held on its last Live picture
+        self.drawRead();
+        return;
+      }
       if (self.follow) self.t = n;
       const isNow = isLive(self.t, n);
       if (isNow) {
@@ -1620,10 +1678,13 @@ function scrubView(source, alertAt, barSlot) {
     };
 
     self.play = () => {
+      if (self.frozen) {
+        self.unfreeze();
+        self.follow = true; // Live again, from now
+        self.draw(false);
+      }
       self.playing = true;
-      glyph.setAttribute("class", "s-bars");
-      btn.setAttribute("aria-label", `Pause ${name}`);
-      player.setAttribute("class", playerClass());
+      drawButton();
       self.applySound();
       self.prime();
       if (!self.live && !ctl.paused) {
@@ -1632,14 +1693,14 @@ function scrubView(source, alertAt, barSlot) {
       }
       run();
     };
-    self.pause = () => {
+    // `hold`: Pause was tapped, so a Live camera holds its picture and closes its stream.
+    self.pause = (hold = false) => {
       self.playing = false;
       self.steady = null;
       front.pause?.();
+      if (hold && self.live && !self.frozen && !ctl.paused) self.holdLive();
       self.applySound();
-      glyph.setAttribute("class", "s-tri");
-      btn.setAttribute("aria-label", `Play ${name}`);
-      player.setAttribute("class", playerClass());
+      drawButton();
     };
     // Paused with the row: nothing plays and nothing streams; Live comes back on resume.
     self.sleep = () => {
@@ -1655,7 +1716,7 @@ function scrubView(source, alertAt, barSlot) {
       showLapse(false);
       swapWhenReady = false;
       self.key = null;
-      if (self.live) {
+      if (self.live && !self.frozen) {
         self.live = false;
         self.closeLive(null);
         restoreVideos();
@@ -1702,7 +1763,7 @@ function scrubView(source, alertAt, barSlot) {
     btn.addEventListener("click", () => {
       touch();
       ctl.last = self;
-      if (self.playing) self.pause();
+      if (going()) self.pause(true);
       else self.play();
     });
     when.addEventListener("click", () => {
@@ -1841,7 +1902,7 @@ function scrubView(source, alertAt, barSlot) {
       return true;
     },
     // What a newer version takes over: each camera's time, sync, full width, the cameras
-    // added.
+    // added. A paused Live camera holds the swap back (busy), so its picture isn't lost.
     carry: () => ({
       sync: ctl.sync,
       last: ctl.last?.camera ?? null,
@@ -1870,47 +1931,81 @@ function scrubView(source, alertAt, barSlot) {
     },
     // The row was closed or the card left the page: nothing plays, streams or waits.
     pause() {
-      if (ctl.paused) return;
-      ctl.paused = true;
-      ctl.vel = 0;
-      ctl.glider = null;
-      ctl.playAll = false;
-      ctl.held = 0;
-      clearTimeout(ctl.idleTimer);
-      ctl.idleTimer = null;
-      for (const l of lanes) l.sleep();
-      stop();
-      observer?.disconnect();
-      observer = null;
-      drawBar();
+      ctl.away = false; // closed: the page coming back into sight doesn't open it
+      listen(false); // and nothing is held for a block that may never be shown again
+      sleepAll();
     },
     // Shown (again): each camera picks up where it was, Live again if it was following now.
     resume() {
       if (ctl.disposed || !ctl.paused) return;
-      ctl.paused = false;
-      if (typeof IntersectionObserver === "function") {
-        observer = new IntersectionObserver((entries) => {
-          for (const entry of entries) {
-            const one = lanes.find((l) => l.pic === entry.target);
-            if (one) one.visible = entry.isIntersecting;
-          }
-          rebalance();
-        });
-        for (const l of lanes) observer.observe(l.pic);
+      listen(true);
+      if (globalThis.document?.hidden) {
+        ctl.away = true; // out of sight: it opens when the page is back
+        return;
       }
-      for (const l of lanes) l.wake();
-      drawBar();
-      run();
-      watchIdle(); // a newer version that was waiting looks again
-      const refocus = ctl.refocus;
-      ctl.refocus = null;
-      if (refocus) setTimeout(() => refocus.keys.focus?.(), 0); // after the swap is painted
+      wakeAll();
     },
     dispose() {
       view.pause();
+      for (const l of lanes) l.unfreeze(); // a held Live picture is let go
       ctl.disposed = true;
     },
   };
+  function sleepAll() {
+    if (ctl.paused) return;
+    ctl.paused = true;
+    ctl.vel = 0;
+    ctl.glider = null;
+    ctl.playAll = false;
+    ctl.held = 0;
+    clearTimeout(ctl.idleTimer);
+    ctl.idleTimer = null;
+    for (const l of lanes) l.sleep();
+    stop();
+    observer?.disconnect();
+    observer = null;
+    drawBar();
+  }
+  function wakeAll() {
+    ctl.paused = false;
+    if (typeof IntersectionObserver === "function") {
+      observer = new IntersectionObserver((entries) => {
+        for (const entry of entries) {
+          const one = lanes.find((l) => l.pic === entry.target);
+          if (one) one.visible = entry.isIntersecting;
+        }
+        rebalance();
+      });
+      for (const l of lanes) observer.observe(l.pic);
+    }
+    for (const l of lanes) l.wake();
+    drawBar();
+    run();
+    watchIdle(); // a newer version that was waiting looks again
+    const refocus = ctl.refocus;
+    ctl.refocus = null;
+    if (refocus) setTimeout(() => refocus.keys.focus?.(), 0); // after the swap is painted
+  }
+  // The app in the background: everything sleeps, and wakes by itself when it is back. Heard
+  // only while the view is shown or waiting for the page to be.
+  function onVisibility() {
+    if (ctl.disposed) return;
+    if (globalThis.document.hidden) {
+      if (ctl.paused) return;
+      sleepAll();
+      ctl.away = true;
+    } else if (ctl.away) {
+      ctl.away = false;
+      wakeAll();
+    }
+  }
+  let listening = false;
+  function listen(on) {
+    if (on === listening) return;
+    listening = on;
+    if (on) globalThis.document?.addEventListener?.("visibilitychange", onVisibility);
+    else globalThis.document?.removeEventListener?.("visibilitychange", onVisibility);
+  }
   return view;
 }
 

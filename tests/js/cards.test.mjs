@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs";
 import { test, beforeEach, afterEach } from "node:test";
 import vm from "node:vm";
 
-import { connect, install, intersect } from "./dom.mjs";
+import { connect, forgetPage, install, intersect, setHidden } from "./dom.mjs";
 
 install();
 vm.runInThisContext(
@@ -80,6 +80,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   Date.now = realNow;
+  forgetPage();
 });
 
 test("a push for the same story keeps the same picture and asks for its URL once", async () => {
@@ -2441,6 +2442,7 @@ test("a stop at a moment Protect hasn't finished recording shows Live, not foota
   assert.ok(fetched.some(([url]) => url === "/live/cam-side"));
   assert.ok(allByClass(week, "span", "s-clock")[0].textContent === "Live");
   assert.ok(!source.footageAsked.some(([camera]) => camera === "cam-side"));
+  week._current.get("gV").pause(); // its stream closed, not left to the next test
 });
 
 test("a camera taken to now stays Live as time goes on; one at a past moment stays there", async () => {
@@ -2644,8 +2646,8 @@ test("dragging one camera moves only that one when not in sync", async () => {
   pdown(pics[0], 200, 0);
   pmove(pics[0], 150, 10);
   pmove(pics[0], 100, 20);
-  pup(pics[0], 100, 25);
-  await wait(600);
+  pup(pics[0], 100, 2000); // held still before letting go: no glide, which could still be
+  await settle(); // creeping on (a 5 s step) under load when the other camera is dragged
   const a0 = timeOf(week, 0);
   const b0 = timeOf(week, 1);
   pdown(pics[1], 100, 5000);
@@ -3126,6 +3128,174 @@ test("at most three Live streams are open; the others offer one, and taking it k
   assert.equal(liveShown(block).length, 3);
   assert.equal(allByClass(week, "button", "s-hint").length, 2);
   block.pause();
+});
+
+test("Pause on a Live camera holds its last picture and closes the stream; Play takes it Live again", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), recentDetail())));
+  const week = await openVisit(source);
+  await settle();
+  const block = week._current.get("gV");
+  const stream = liveStreams.at(-1);
+  stream.push();
+  await settle();
+  const { btns, clocks } = lanesOf(week);
+  assert.equal(btns[0].getAttribute("aria-label"), "Pause Sidewalk", "Live, it is going");
+  btns[0].dispatch("click"); // one tap pauses
+  assert.equal(stream.aborted, true, "nothing streams while paused");
+  assert.equal(liveShown(block).length, 1, "the last picture stays");
+  assert.match(liveShown(block)[0].src, /^blob:/);
+  assert.notEqual(clocks[0].textContent, "Live");
+  assert.ok(texts(week).includes("Paused"));
+  assert.equal(btns[0].getAttribute("aria-label"), "Play Sidewalk");
+  const opened = liveStreams.length;
+  await settle();
+  assert.equal(liveStreams.length, opened, "a paused camera opens no stream by itself");
+  btns[0].dispatch("click");
+  await settle();
+  assert.equal(liveStreams.length, opened + 1);
+  assert.equal(clocks[0].textContent, "Live");
+  // Pause on the bar holds every Live camera too.
+  withClass(week, "button", "s-sync").dispatch("click");
+  withClass(week, "button", "s-all").dispatch("click"); // Pause: Live was going
+  await settle();
+  assert.ok(liveStreams.slice(opened).every((s) => s.aborted));
+  assert.ok(lanesOf(week).btns.every((b) => b.getAttribute("aria-label").startsWith("Play")));
+  // Scrubbed back from a paused Live, it shows the recording; scrubbed to now, Live again.
+  lanesOf(week).keys[0].dispatch("input", { target: { value: String(Math.floor(Date.now() / 1000) - 3600) } });
+  assert.equal(liveShown(block).length, 0);
+  lanesOf(week).keys[0].dispatch("input", { target: { value: String(Math.floor(Date.now() / 1000) + 60) } });
+  await settle();
+  assert.equal(liveShown(block).length, lanesOf(week).pics.length, "in sync, every camera");
+  assert.equal(liveStreams.at(-1).aborted, false);
+  block.pause();
+});
+
+test("Pause on the bar: no camera streams, the bar says Paused, and one waiting for a stream offers Live", async () => {
+  const source = countLive(withScrub(withClips(withDetail(fakeSource(), fiveLive()))));
+  const week = await openVisit(source);
+  await settle();
+  await settle();
+  const block = week._current.get("gV");
+  for (const stream of livesOpen()) stream.push();
+  await settle();
+  withClass(week, "button", "s-sync").dispatch("click");
+  const asked = source.liveOpened;
+  withClass(week, "button", "s-all").dispatch("click"); // Pause: the Live cameras were going
+  await settle();
+  assert.equal(livesOpen().length, 0, "nothing streams");
+  assert.equal(source.liveOpened, asked, "no freed slot opens a stream for another camera");
+  assert.equal(liveShown(block).length, 3, "the three that showed a picture keep it");
+  const hints = allByClass(week, "button", "s-hint");
+  assert.deepEqual(hints.map((h) => h.textContent), ["Paused. Tap for Live", "Paused. Tap for Live"]);
+  assert.notEqual(withClass(week, "span", "s-big").textContent, "Live", "the bar isn't Live");
+  assert.equal(withClass(week, "span", "s-sub").textContent, "Paused");
+  hints[0].dispatch("click");
+  await settle();
+  assert.equal(livesOpen().length, 1, "tapped: that camera is Live again");
+  block.pause();
+});
+
+test("a paused Live camera stays on its moment as time goes on, and turning sync on leaves it paused", async () => {
+  await withClock(async (skew) => {
+    const source = withScrub(withClips(withDetail(fakeSource(), recentDetail())));
+    const week = await openVisit(source);
+    await settle();
+    const block = week._current.get("gV");
+    liveStreams.at(-1).push();
+    await settle();
+    const { btns, clocks } = lanesOf(week);
+    btns[0].dispatch("click");
+    const held = clocks[0].textContent;
+    assert.notEqual(held, "Live");
+    skew(200 * 1000);
+    await wait(1100); // a frame or more
+    assert.equal(clocks[0].textContent, held);
+    assert.equal(liveShown(block).length, 1);
+    withClass(week, "button", "s-sync").dispatch("click");
+    await settle();
+    assert.equal(clocks[0].textContent, held, "still paused");
+    assert.equal(liveShown(block).length, 1);
+    block.pause();
+  });
+});
+
+test("pausing a Live camera gives its stream to one waiting for it", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), fiveLive())));
+  const week = await openVisit(source);
+  await settle();
+  await settle();
+  const block = week._current.get("gV");
+  assert.equal(livesOpen().length, 3);
+  lanesOf(week).btns[0].dispatch("click");
+  await settle();
+  assert.equal(livesOpen().length, 3, "a waiting camera took the slot");
+  assert.ok(livesOpen().every((s) => s.url !== "/live/cam-a"));
+  block.pause();
+});
+
+test("a version listens for the page going out of sight only while it is shown", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), recentDetail())));
+  const week = await openVisit(source);
+  await settle();
+  const block = week._current.get("gV");
+  assert.equal(document.listening("visibilitychange"), 1);
+  block.pause(); // closed (or dropped unshown): nothing held on the page for it
+  assert.equal(document.listening("visibilitychange"), 0);
+  block.resume();
+  assert.equal(document.listening("visibilitychange"), 1);
+  block.dispose();
+  assert.equal(document.listening("visibilitychange"), 0);
+});
+
+test("Live closes while the page is out of sight and opens again by itself when it is back", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), recentDetail())));
+  const week = await openVisit(source);
+  await settle();
+  const block = week._current.get("gV");
+  const stream = liveStreams.at(-1);
+  setHidden(true);
+  assert.equal(stream.aborted, true, "nothing streams in the background");
+  const opened = liveStreams.length;
+  setHidden(false);
+  await settle();
+  assert.equal(liveStreams.length, opened + 1);
+  assert.equal(liveShown(block).length, 1);
+  assert.equal(lanesOf(week).clocks[0].textContent, "Live");
+  // A row closed while out of sight stays closed when the page is back.
+  setHidden(true);
+  block.pause();
+  setHidden(false);
+  await settle();
+  assert.equal(liveShown(block).length, 0);
+  // And one opened again while out of sight waits for the page.
+  setHidden(true);
+  block.resume();
+  await settle();
+  assert.equal(liveShown(block).length, 0);
+  setHidden(false);
+  await settle();
+  assert.equal(liveShown(block).length, 1);
+  block.pause();
+});
+
+test("a paused Live camera stays paused, its picture kept, through the page going out of sight", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), recentDetail())));
+  const week = await openVisit(source);
+  await settle();
+  const block = week._current.get("gV");
+  liveStreams.at(-1).push();
+  await settle();
+  const { btns } = lanesOf(week);
+  btns[0].dispatch("click");
+  const opened = liveStreams.length;
+  setHidden(true);
+  setHidden(false);
+  await settle();
+  assert.equal(liveStreams.length, opened);
+  assert.equal(liveShown(block).length, 1);
+  assert.ok(texts(week).includes("Paused"));
+  block.dispose();
+  assert.equal(liveShown(block).length, 0, "let go when the block goes");
 });
 
 test("a Live stream that stops says when it was last live, and offers to try again", async () => {
@@ -3659,14 +3829,15 @@ test("after a stall, full quality waits 30 s of steady playback, doubling each s
   });
 });
 
-test("Play on a Live camera counts as playing, alone or with Play all", async () => {
+test("a Live camera is going: one tap pauses it, and paused it holds a newer version back", async () => {
   await withClock(async (skew) => {
     const source = withScrub(withClips(withDetail(fakeSource(), recentDetail())));
     const week = await openVisit(source);
     await settle();
     const { btns } = lanesOf(week);
-    btns[0].dispatch("click");
     assert.equal(btns[0].getAttribute("aria-label"), "Pause Sidewalk");
+    btns[0].dispatch("click");
+    assert.equal(btns[0].getAttribute("aria-label"), "Play Sidewalk");
     const newer = recentDetail();
     newer.visit.headline = "NEWER VERSION HEADLINE";
     source.detail = async () => newer;
@@ -3675,13 +3846,46 @@ test("Play on a Live camera counts as playing, alone or with Play all", async ()
     source.push([story]);
     await settle();
     await settle();
-    assert.ok(!texts(week).includes("NEWER VERSION HEADLINE"), "a playing Live camera holds it back");
+    assert.ok(!texts(week).includes("NEWER VERSION HEADLINE"), "a paused Live camera holds it back");
     btns[0].dispatch("click");
+    assert.equal(btns[0].getAttribute("aria-label"), "Pause Sidewalk", "Live again");
     withClass(week, "button", "s-sync").dispatch("click");
-    withClass(week, "button", "s-all").dispatch("click");
+    const all = withClass(week, "button", "s-all");
+    assert.equal(all.getAttribute("aria-label"), "Pause every camera", "Live cameras go by themselves");
+    all.dispatch("click");
+    assert.ok(lanesOf(week).btns.every((b) => b.getAttribute("aria-label").startsWith("Play")));
+    assert.equal(all.getAttribute("aria-label"), "Play every camera together");
+    all.dispatch("click");
     assert.ok(lanesOf(week).btns.every((b) => b.getAttribute("aria-label").startsWith("Pause")));
     week._current.get("gV").pause();
   });
+});
+
+test("a newer version comes in after Pause then Play on Live, and with a paused camera in a closed row", async () => {
+  for (const closeRow of [false, true]) {
+    await withClock(async (skew) => {
+      const source = withScrub(withClips(withDetail(fakeSource(), recentDetail())));
+      const week = await openVisit(source);
+      await settle();
+      const block = week._current.get("gV");
+      const { btns } = lanesOf(week);
+      btns[0].dispatch("click"); // paused
+      if (closeRow) block.pause();
+      else btns[0].dispatch("click"); // and Live again
+      const newer = recentDetail();
+      newer.visit.headline = "NEWER VERSION HEADLINE";
+      source.detail = async () => newer;
+      skew(10000);
+      source.push([guardStory("gV", { title: TRIAL_TITLE, updated: NEWER })]);
+      for (let i = 0; i < 4; i++) await settle();
+      await wait(50);
+      await settle();
+      if (closeRow) block.resume?.();
+      await settle();
+      assert.ok(texts(week).includes("NEWER VERSION HEADLINE"), closeRow ? "closed row" : "Live again");
+      week._current.get("gV").pause();
+    });
+  }
 });
 
 test("opening Add a camera and focusing a camera's time count as use, and a swap keeps both", async () => {
@@ -4038,7 +4242,8 @@ function localInput(t) {
 }
 
 test("a camera's clock is a button that opens a date and time picker at that moment", async () => {
-  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const detail = visitDetail(); // one visit: built twice, a second could tick in between
+  const source = withScrub(withClips(withDetail(fakeSource(), detail)));
   const week = await openVisit(source);
   const whens = allByClass(week, "button", "s-when");
   assert.equal(whens.length, 2);
@@ -4050,7 +4255,7 @@ test("a camera's clock is a button that opens a date and time picker at that mom
   assert.equal(inputs[0].getAttribute("step"), "1");
   whens[0].dispatch("click");
   assert.equal(document.activeElement, inputs[0]);
-  assert.equal(inputs[0].value, localInput(Math.floor(Date.parse(visitDetail().visit.stops[0].time) / 1000)));
+  assert.equal(inputs[0].value, localInput(Math.floor(Date.parse(detail.visit.stops[0].time) / 1000)));
   assert.ok(Math.abs(Date.parse(inputs[0].max) - Date.now()) < 2000); // now, to the second
   week._current.get("gV").pause();
 });
@@ -4188,7 +4393,10 @@ test("a minute that ends while playing hands over at once to the one loaded ahea
 });
 
 test("going back to the minute on show asks for nothing and swaps nothing", async () => {
-  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  // Mid-minute: the slider's time is to 5 s, which from :58 would be the next minute.
+  const detail = visitDetail();
+  detail.visit.stops[0].time = new Date((Math.floor(Date.now() / 60000) - 12) * 60000 + 30000).toISOString();
+  const source = withScrub(withClips(withDetail(fakeSource(), detail)));
   const week = await openVisit(source);
   await settle();
   const shown = lanesOf(week).videos[0];
@@ -4910,20 +5118,26 @@ test("the next minute is loaded ahead at low quality, whatever is playing", asyn
 });
 
 test("no minute is loaded ahead that would be Live", async () => {
-  const detail = visitDetail();
-  detail.visit.stops[0].time = new Date(Date.now() - 110 * 1000).toISOString(); // its next minute is still being written
-  const source = withScrub(withClips(withDetail(fakeSource(), detail)));
-  const week = await openVisit(source);
-  lanesOf(week).btns[0].dispatch("click");
-  await settle();
-  const shown = lanesOf(week).videos[0];
-  shown.readyState = 1;
-  shown.currentTime = 45;
-  await wait(120);
-  await settle();
-  assert.equal(lanesOf(week).clocks[0].textContent === "Live", false);
-  assert.ok(!lanesOf(week).standbys[0].src);
-  week._current.get("gV").pause();
+  await withClock(async (skew) => {
+    // The clock at 15 s past a minute, so the stop's minute (from 105 s ago) is whole and the
+    // next isn't, 30 s either way: from the wall clock, the next one was sometimes whole.
+    skew((((15 - (Date.now() / 1000) % 60) % 60) + 60) % 60 * 1000);
+    const detail = visitDetail();
+    const minute = Math.floor((Date.now() / 1000 - 105) / 60) * 60;
+    detail.visit.stops[0].time = new Date(minute * 1000).toISOString();
+    const source = withScrub(withClips(withDetail(fakeSource(), detail)));
+    const week = await openVisit(source);
+    lanesOf(week).btns[0].dispatch("click");
+    await settle();
+    const shown = lanesOf(week).videos[0];
+    shown.readyState = 1;
+    shown.currentTime = 45;
+    await wait(120);
+    await settle();
+    assert.equal(lanesOf(week).clocks[0].textContent === "Live", false);
+    assert.ok(!lanesOf(week).standbys[0].src);
+    week._current.get("gV").pause();
+  });
 });
 
 test("a camera going Live lets go of its videos and timelapse", async () => {

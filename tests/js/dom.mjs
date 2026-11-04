@@ -136,7 +136,25 @@ export function install() {
       return registry.get(name);
     },
   };
+  const pageListeners = new Map();
   globalThis.document = {
+    hidden: false,
+    addEventListener(type, fn) {
+      if (!pageListeners.has(type)) pageListeners.set(type, new Set());
+      pageListeners.get(type).add(fn);
+    },
+    removeEventListener(type, fn) {
+      pageListeners.get(type)?.delete(fn);
+    },
+    dispatch(type) {
+      for (const fn of [...(pageListeners.get(type) || [])]) fn({ type });
+    },
+    forget() {
+      pageListeners.clear();
+    },
+    listening(type) {
+      return pageListeners.get(type)?.size ?? 0;
+    },
     createElement(tag) {
       const cls = registry.get(tag);
       if (!cls) return new Element(tag);
@@ -178,4 +196,17 @@ export function connect(element) {
   element._connected = true;
   element.connectedCallback?.();
   return element;
+}
+
+// The page going out of sight (the app in the background) or coming back, as the browser says
+// it with visibilitychange.
+export function setHidden(hidden) {
+  globalThis.document.hidden = hidden;
+  globalThis.document.dispatch("visibilitychange");
+}
+
+// Between tests: in sight, and no one listening from a test before.
+export function forgetPage() {
+  globalThis.document.hidden = false;
+  globalThis.document.forget();
 }
