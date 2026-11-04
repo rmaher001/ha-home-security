@@ -398,6 +398,7 @@ async def test_unloading_cuts_a_streaming_response(
         ("GET", f"api/v1/cameras/{CAM}/frame/1793761234.jpg"),
         ("GET", f"api/v1/cameras/{CAM}/detections/1793760000-1793763600"),
         ("GET", f"api/v1/cameras/{CAM}/live"),
+        ("GET", f"api/v1/cameras/{CAM}/timelapse/1793760600.mp4"),
     ],
 )
 def test_ordinary_routes_are_open_to_any_signed_in_user(method: str, path: str) -> None:
@@ -545,6 +546,15 @@ BLOCKED = [
     ("GET", f"api/v1/cameras/{CAM}/frame/1793761234.jpg/x"),
     ("GET", f"api/v1/cameras/{CAM}/frame/1793761234xjpg"),  # the dot is a dot
     ("GET", f"api/v1/cameras/{CAM}/footage/1793761200-lowxmp4"),
+    ("GET", f"api/v1/cameras/{CAM}/timelapse/1793760600xmp4"),  # the dot is a dot
+    ("GET", f"api/v1/cameras/{CAM}/timelapse/179376060.mp4"),  # nine digits
+    ("GET", f"api/v1/cameras/{CAM}/timelapse/17937606000.mp4"),  # eleven
+    ("GET", f"api/v1/cameras/{CAM}/timelapse/1793760600.mp4/"),
+    ("GET", f"api/v1/cameras/{CAM}/timelapse/1793760600-low.mp4"),
+    ("GET", f"api/v1/cameras/{CAM}/timelapse/1793760600.jpg"),
+    ("GET", f"api/v1/cameras/{CAM}/timelapse/"),
+    ("POST", f"api/v1/cameras/{CAM}/timelapse/1793760600.mp4"),
+    ("GET", f"api/v1/cameras/{CAM}/timelapse/%2e%2e/1793760600.mp4"),
     ("GET", f"api/v1/cameras/{CAM}/detections/1793760000"),
     ("GET", f"api/v1/cameras/{CAM}/detections/1793760000-"),
     ("GET", f"api/v1/cameras/{CAM}/detections/1793760000-179376360"),
@@ -662,6 +672,18 @@ async def test_a_cameras_footage_streams_through_and_can_be_sought(
     hass: HomeAssistant, engine: FakeEngine, browser, clock: Clock
 ) -> None:
     path = f"{BASE}/api/v1/cameras/{CAM}/footage/1793761200-low.mp4"
+    assert await (await browser.get(path)).read() == CLIP
+    part = await browser.get(path, headers={"Range": "bytes=5-14"})
+    assert part.status == 206
+    assert part.headers["Content-Range"] == f"bytes 5-14/{len(CLIP)}"
+    assert await part.read() == CLIP[5:15]
+    assert engine.echoes[-1]["headers"]["Range"] == "bytes=5-14"
+
+
+async def test_a_cameras_timelapse_streams_through_and_can_be_sought(
+    hass: HomeAssistant, engine: FakeEngine, browser, clock: Clock
+) -> None:
+    path = f"{BASE}/api/v1/cameras/{CAM}/timelapse/1793760600.mp4"
     assert await (await browser.get(path)).read() == CLIP
     part = await browser.get(path, headers={"Range": "bytes=5-14"})
     assert part.status == 206

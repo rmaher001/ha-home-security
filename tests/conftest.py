@@ -114,6 +114,7 @@ class FakeEngine:
         app.router.add_get("/api/v1/stories/{id}/picture.jpg", self._picture)
         app.router.add_get("/api/v1/stories/{id}/clip/{stop}.mp4", self._clip)
         app.router.add_get("/api/v1/cameras/{camera}/footage/{minute}-{quality}.mp4", self._footage)
+        app.router.add_get("/api/v1/cameras/{camera}/timelapse/{block}.mp4", self._footage)
         app.router.add_get("/api/v1/cameras/{camera}/live", self._live)
         app.router.add_post("/api/v1/stories/{id}/fine", self._fine)
         app.router.add_post("/api/v1/stories/{id}/learn", self._learn)

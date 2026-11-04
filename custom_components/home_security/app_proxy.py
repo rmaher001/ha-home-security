@@ -246,6 +246,8 @@ _ROUTES: tuple[tuple[str, re.Pattern[str], str], ...] = tuple(
         ("GET", rf"api/v1/cameras/{_CAMERA}/frame/[0-9]{{10}}\.jpg", "open"),
         ("GET", rf"api/v1/cameras/{_CAMERA}/detections/[0-9]{{10}}-[0-9]{{10}}", "open"),
         ("GET", rf"api/v1/cameras/{_CAMERA}/live", "open"),
+        # A ten-minute block as a timelapse, for scrubbing fast (video, sought by byte range).
+        ("GET", rf"api/v1/cameras/{_CAMERA}/timelapse/[0-9]{{10}}\.mp4", "open"),
         ("POST", rf"api/v1/stories/{_ID}/fine", "open"),
         ("PUT", r"api/v1/mode", "open"),
         ("PUT", r"api/v1/alerts", "open"),
