@@ -2821,7 +2821,7 @@ test("in sync, dragging any camera moves them all; sync lines up on the one last
   week._current.get("gV").pause();
 });
 
-test("Play all plays every camera, with sound only from the one last touched", async () => {
+test("Play all plays every camera, heard only from the one whose sound is on", async () => {
   const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
   const week = await openVisit(source);
   const { btns, videos } = lanesOf(week);
@@ -2830,8 +2830,7 @@ test("Play all plays every camera, with sound only from the one last touched", a
     v.play = () => (played.push(i), Promise.resolve());
     v.pause = () => {};
   });
-  btns[1].dispatch("click"); // touched (and played) the garage
-  btns[1].dispatch("click");
+  allByClass(week, "button", "s-snd")[1].dispatch("click"); // the garage's sound on
   withClass(week, "button", "s-sync").dispatch("click");
   played.length = 0;
   const all = withClass(week, "button", "s-all");
@@ -4397,7 +4396,8 @@ test("a jump to the minute already loaded ahead takes it from there, sought, wit
 test("the camera's sound goes with the minute that comes forward", async () => {
   const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
   const week = await openVisit(source);
-  lanesOf(week).btns[0].dispatch("click"); // played, so heard
+  allByClass(week, "button", "s-snd")[0].dispatch("click"); // sound on
+  lanesOf(week).btns[0].dispatch("click"); // and playing: heard
   await settle();
   const shown = lanesOf(week).videos[0];
   assert.equal(shown.muted, false);
@@ -4477,5 +4477,143 @@ test("a time that isn't a date and time in full is not picked", async () => {
     input.dispatch("change", { target: input });
     assert.equal(timeOf(week, 0), before, junk);
   }
+  week._current.get("gV").pause();
+});
+
+// --- sound, and going Live ---------------------------------------------------------------------
+
+test("each camera has a sound button; sound is on for one camera at a time", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  const snd = allByClass(week, "button", "s-snd");
+  assert.equal(snd.length, 2);
+  assert.equal(snd[0].getAttribute("aria-pressed"), "false");
+  assert.equal(snd[0].getAttribute("aria-label"), "Sound: Sidewalk");
+  snd[1].dispatch("click");
+  assert.deepEqual(snd.map((b) => b.getAttribute("aria-pressed")), ["false", "true"]);
+  snd[0].dispatch("click");
+  assert.deepEqual(snd.map((b) => b.getAttribute("aria-pressed")), ["true", "false"]);
+  snd[0].dispatch("click");
+  assert.deepEqual(snd.map((b) => b.getAttribute("aria-pressed")), ["false", "false"]);
+  let stopped = 0;
+  snd[0].dispatch("pointerdown", { stopPropagation: () => stopped++ });
+  assert.equal(stopped, 1); // no tap on the picture
+  week._current.get("gV").pause();
+});
+
+test("a camera playing is heard only with its sound on", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  const { btns, videos } = lanesOf(week);
+  btns[0].dispatch("click"); // playing, sound off
+  assert.equal(videos[0].muted, true);
+  allByClass(week, "button", "s-snd")[0].dispatch("click");
+  assert.equal(videos[0].muted, false);
+  allByClass(week, "button", "s-snd")[1].dispatch("click"); // another camera's sound: this one goes quiet
+  assert.equal(videos[0].muted, true);
+  btns[0].dispatch("click");
+  assert.ok(lanesOf(week).standbys.every((v) => v.muted));
+  week._current.get("gV").pause();
+});
+
+test("Play all with no camera's sound on is silent", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  lanesOf(week).btns[1].dispatch("click"); // touched last, but no sound chosen
+  lanesOf(week).btns[1].dispatch("click");
+  withClass(week, "button", "s-sync").dispatch("click");
+  withClass(week, "button", "s-all").dispatch("click");
+  assert.ok(lanesOf(week).videos.every((v) => v.muted));
+  week._current.get("gV").pause();
+});
+
+test("the sound choice survives a newer version of the visit", async () => {
+  await withClock(async (skew) => {
+    const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+    const week = await openVisit(source);
+    allByClass(week, "button", "s-snd")[1].dispatch("click");
+    const newer = visitDetail();
+    newer.visit.headline = "NEWER VERSION HEADLINE";
+    source.detail = async () => newer;
+    skew(10000);
+    source.push([guardStory("gV", { title: TRIAL_TITLE, updated: NEWER })]);
+    await settle();
+    await settle();
+    assert.ok(texts(week).includes("NEWER VERSION HEADLINE"));
+    assert.deepEqual(allByClass(week, "button", "s-snd").map((b) => b.getAttribute("aria-pressed")), ["false", "true"]);
+    week._current.get("gV").pause();
+  });
+});
+
+test("a Live camera has no sound button", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), recentDetail())));
+  const week = await openVisit(source);
+  await settle();
+  const block = week._current.get("gV");
+  const inPic = (i) => lanesOf(week).pics[i].childNodes.some((n) => n.getAttribute("class") === "s-snd");
+  assert.equal(inPic(0), false);
+  assert.equal(inPic(1), true);
+  block.pause();
+});
+
+test("a camera's Live button takes it to now, and stays away while it is Live", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  const golive = () => allByClass(week, "button", "s-golive");
+  const shownIn = (i) => lanesOf(week).players[i].querySelectorAll("button").some((b) => b.getAttribute("class") === "s-golive");
+  assert.equal(golive().length, 2);
+  assert.equal(golive()[0].getAttribute("aria-label"), "Go Live: Sidewalk");
+  golive()[0].dispatch("click");
+  await settle();
+  assert.equal(lanesOf(week).clocks[0].textContent, "Live");
+  assert.equal(shownIn(0), false);
+  assert.equal(shownIn(1), true);
+  assert.notEqual(lanesOf(week).clocks[1].textContent, "Live"); // not in sync: only that one
+  week._current.get("gV").pause();
+});
+
+test("in sync, Live on the bar takes every camera Live, three streams at most", async () => {
+  const detail = visitDetail();
+  const past = new Date(Date.now() - 3600 * 1000).toISOString();
+  detail.visit.stops = ["a", "b", "c", "d", "e"].map((x, i) => ({ place: `P${x}`, time: past, what: "a person", names: [], picture: null, camera: `cam-${x}`, alerted: i === 0 }));
+  detail.visit.alerted = { stop: 0, alert: 0.8 };
+  const source = withScrub(withClips(withDetail(fakeSource(), detail)));
+  const week = await openVisit(source);
+  assert.equal(allByClass(week, "button", "s-all-live").length, 0); // not in sync: no bar button
+  withClass(week, "button", "s-sync").dispatch("click");
+  const all = withClass(week, "button", "s-all-live");
+  assert.equal(all.getAttribute("aria-label"), "Take every camera Live");
+  all.dispatch("click");
+  await settle();
+  await settle();
+  assert.ok(lanesOf(week).clocks.every((c) => c.textContent === "Live"));
+  assert.equal(liveShown(week._current.get("gV")).length, 3);
+  assert.equal(allByClass(week, "button", "s-hint").length, 2);
+  week._current.get("gV").pause();
+});
+
+test("the bar's Live button goes while the cameras are Live, and comes back beside Play all", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  withClass(week, "button", "s-sync").dispatch("click");
+  withClass(week, "button", "s-all-live").dispatch("click");
+  await settle();
+  assert.equal(allByClass(week, "button", "s-all-live").length, 0);
+  lanesOf(week).keys[0].dispatch("input", { target: { value: String(Math.floor(Date.now() / 1000) - 3600) } });
+  const row = withClass(week, "button", "s-all").parentNode;
+  assert.deepEqual(row.childNodes.map((n) => n.getAttribute("class")), ["s-all-live", "s-all"]);
+  week._current.get("gV").pause();
+});
+
+test("leaving Live brings back the camera's sound and Live buttons", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), recentDetail())));
+  const week = await openVisit(source);
+  await settle();
+  const has = (node, cls) => node.querySelectorAll("button").some((b) => b.getAttribute("class") === cls);
+  assert.equal(has(lanesOf(week).pics[0], "s-snd"), false);
+  assert.equal(has(lanesOf(week).players[0], "s-golive"), false);
+  lanesOf(week).keys[0].dispatch("input", { target: { value: String(Math.floor(Date.now() / 1000) - 3600) } });
+  assert.equal(has(lanesOf(week).pics[0], "s-snd"), true);
+  assert.equal(has(lanesOf(week).players[0], "s-golive"), true);
   week._current.get("gV").pause();
 });

@@ -164,7 +164,11 @@ const STYLE = `
   .s-mark::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: var(--hs-stranger); }
   .s-btn { position: absolute; left: 0; bottom: 0; z-index: 1; display: grid; place-items: center; width: 40px; height: 40px; padding: 0; background: none; border: 0; cursor: pointer; }
   .s-disc { display: grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; background: rgba(0, 0, 0, .45); }
-  .s-playing .s-btn { opacity: .45; }
+  .s-snd { position: absolute; left: 40px; bottom: 0; z-index: 1; display: grid; place-items: center; width: 40px; height: 40px; padding: 0; background: none; border: 0; cursor: pointer; }
+  .s-playing .s-btn, .s-playing .s-snd { opacity: .45; }
+  .s-golive, .s-all-live { display: inline-flex; align-items: center; gap: 5px; min-height: 28px; padding: 0 10px; border-radius: 14px; background: transparent; border: 1.5px solid var(--hs-rule); color: var(--primary-text-color, #212121); font: inherit; font-size: 12px; font-weight: 650; cursor: pointer; }
+  .s-golive::before, .s-all-live::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--hs-stranger); }
+  .s-all-live { min-height: 40px; padding: 0 14px; border-radius: 20px; font-size: 14px; }
   .s-tri { width: 0; height: 0; border-style: solid; border-color: transparent transparent transparent #fff; border-width: 4px 0 4px 7px; margin-left: 2px; }
   .s-bars { box-sizing: border-box; width: 8px; height: 8px; border-left: 2px solid #fff; border-right: 2px solid #fff; }
   .s-tape { position: relative; height: 34px; margin-top: 6px; overflow: hidden; touch-action: pan-y; user-select: none; -webkit-user-select: none; cursor: grab; }
@@ -790,7 +794,7 @@ const setText = (node, text) => {
 function scrubView(source, alertAt, barSlot) {
   const lanes = [];
   const ticks = new Map(); // a camera -> {asked: Map(block start -> {at, ok}), list, version, redraw}
-  const ctl = { sync: false, last: null, playAll: false, timer: null, vel: 0, glider: null, held: 0, paused: true, disposed: false, active: 0, idleTimer: null, onIdle: null, focus: null, refocus: null };
+  const ctl = { sync: false, last: null, playAll: false, timer: null, vel: 0, glider: null, held: 0, paused: true, disposed: false, active: 0, idleTimer: null, onIdle: null, focus: null, refocus: null, heard: null };
   const live = new Set(); // the lanes with a Live stream open
   const now = () => Date.now() / 1000;
   let observer = null;
@@ -806,7 +810,15 @@ function scrubView(source, alertAt, barSlot) {
   const sharedRel = el("span", { class: "s-sub" });
   const playAllWord = el("span", {}, "Play all");
   const playAll = el("button", { class: "s-all", type: "button", "aria-label": "Play every camera together" }, playAllWord);
-  const shared = el("div", { class: "s-shared" }, el("div", {}, sharedWhen, sharedRel, sharedTime), playAll);
+  const allLive = el("button", { class: "s-all-live", type: "button", "aria-label": "Take every camera Live" }, "Live");
+  const sharedButtons = el("div", { class: "s-row" }, allLive, playAll);
+  const shared = el("div", { class: "s-shared" }, el("div", {}, sharedWhen, sharedRel, sharedTime), sharedButtons);
+  allLive.addEventListener("click", () => {
+    const lane = ctl.last ?? lanes[0];
+    if (!lane) return;
+    touch();
+    move(lane, now(), false); // in sync: every camera, three streams at most
+  });
   sharedWhen.addEventListener("click", () => {
     touch();
     const lane = ctl.last ?? lanes[0];
@@ -833,6 +845,8 @@ function scrubView(source, alertAt, barSlot) {
     const rel = lane.live ? "every camera, now" : alertAt === null ? "" : relWords(lane.t, alertAt, "the moment the guard alerted").replace(/ (before|after)$/, " $1 the alert");
     setText(sharedRel, rel);
     setText(playAllWord, ctl.playAll ? "Pause" : "Play all");
+    if (lane.live) allLive.remove(); // already Live: no need
+    else if (allLive.parentNode !== sharedButtons) sharedButtons.replaceChildren(allLive, playAll);
     playAll.setAttribute("aria-label", ctl.playAll ? "Pause every camera" : "Play every camera together");
   };
 
@@ -915,6 +929,11 @@ function scrubView(source, alertAt, barSlot) {
     ctl.sync = true;
     move(ctl.last ?? lanes[0], alertAt, false);
   });
+  // Sound from one camera at a time, the one whose sound is on, while it plays.
+  function hear(lane) {
+    ctl.heard = lane;
+    for (const l of lanes) l.applySound();
+  }
   function setPlayAll(on) {
     ctl.playAll = on;
     for (const lane of lanes) (on ? lane.play() : lane.pause());
@@ -1034,7 +1053,8 @@ function scrubView(source, alertAt, barSlot) {
     const note = el("span", { class: "s-note" });
     const glyph = el("span", { class: "s-tri" });
     const btn = el("button", { class: "s-btn", type: "button", "aria-label": `Play ${name}` }, el("span", { class: "s-disc" }, glyph));
-    const pic = el("div", { class: "s-pic" }, back, front, lapse, btn);
+    const snd = el("button", { class: "s-snd", type: "button", "aria-pressed": "false", "aria-label": `Sound: ${name}` }, el("span", { class: "s-disc" }, el("span", { class: "v-spk v-muted" })));
+    const pic = el("div", { class: "s-pic" }, back, front, lapse, btn, snd);
     const strip = el("div", { class: "s-strip" });
     const future = el("span", { class: "s-future" });
     const keys = el("input", { class: "s-key", type: "range", step: "5", min: "0", "aria-label": `${name}: move through time` });
@@ -1043,7 +1063,9 @@ function scrubView(source, alertAt, barSlot) {
     const when = el("button", { class: "s-when", type: "button", "aria-label": `Pick a time for ${name}` }, clock);
     const timeInput = el("input", { class: "s-time", type: "datetime-local", step: "1", "aria-label": `${name}: pick a time` });
     const rel = el("span", { class: "s-rel" });
-    const player = el("div", { class: "s-player" }, pic, tape, el("div", { class: "s-read" }, when, rel, timeInput));
+    const goLive = el("button", { class: "s-golive", type: "button", "aria-label": `Go Live: ${name}` }, "Live");
+    const read = el("div", { class: "s-read" }, when, goLive, rel, timeInput);
+    const player = el("div", { class: "s-player" }, pic, tape, read);
     const failed = new Map(); // a minute's key -> when it couldn't be had
     let stillTimer = null;
     let deadTimer = null;
@@ -1129,8 +1151,7 @@ function scrubView(source, alertAt, barSlot) {
       swapWhenReady = false;
       front.setAttribute("class", "s-video s-front");
       back.setAttribute("class", "s-video s-standby");
-      front.muted = old.muted;
-      old.muted = true;
+      self.applySound(); // the sound goes with the minute on show
       old.pause?.();
       if (self.playing) front.play?.()?.catch?.(() => {});
       show(still, pic, false);
@@ -1429,18 +1450,21 @@ function scrubView(source, alertAt, barSlot) {
       self.live = on;
       if (on) {
         front.pause?.();
-        for (const v of [front, back, lapse]) show(v, pic, false);
+        for (const v of [front, back, lapse, snd]) show(v, pic, false);
         show(still, pic, false);
         say("");
         self.openLive(false);
       } else {
         self.closeLive(null);
         restoreVideos();
+        show(snd, pic, true);
       }
     }
 
     self.drawRead = () => {
       const dead = self.live && self.liveState === "dead";
+      if (self.live) goLive.remove();
+      else if (goLive.parentNode !== read) read.insertBefore?.(goLive, rel) ?? read.append(goLive);
       setText(clock, dead ? clockOf(liveSince ?? self.t) : self.live ? "Live" : clockOf(self.t));
       clock.setAttribute("class", self.live && !dead ? "s-clock s-red" : "s-clock");
       setText(rel, dead ? "Live stopped" : self.live ? "now" : relWords(self.t, self.anchor, self.added ? "when added" : "when they got here"));
@@ -1531,7 +1555,7 @@ function scrubView(source, alertAt, barSlot) {
       glyph.setAttribute("class", "s-bars");
       btn.setAttribute("aria-label", `Pause ${name}`);
       player.setAttribute("class", playerClass());
-      front.muted = ctl.last !== self; // sound only from the camera last touched
+      self.applySound();
       if (!self.live && !ctl.paused) {
         load();
         front.play?.()?.catch?.(() => {});
@@ -1542,7 +1566,7 @@ function scrubView(source, alertAt, barSlot) {
       self.playing = false;
       self.steady = null;
       front.pause?.();
-      front.muted = true;
+      self.applySound();
       glyph.setAttribute("class", "s-tri");
       btn.setAttribute("aria-label", `Play ${name}`);
       player.setAttribute("class", playerClass());
@@ -1565,6 +1589,7 @@ function scrubView(source, alertAt, barSlot) {
         self.live = false;
         self.closeLive(null);
         restoreVideos();
+        show(snd, pic, true);
       }
     };
     self.wake = () => {
@@ -1585,6 +1610,23 @@ function scrubView(source, alertAt, barSlot) {
     self.player = player;
     self.pic = pic;
 
+    // Heard while it plays with its sound on; the standby is never heard.
+    self.applySound = () => {
+      const on = ctl.heard === self;
+      front.muted = !(on && self.playing);
+      back.muted = true;
+      snd.setAttribute("aria-pressed", on ? "true" : "false");
+      snd.querySelector("span")?.querySelector("span")?.setAttribute("class", on ? "v-spk" : "v-spk v-muted");
+    };
+    snd.addEventListener("pointerdown", (event) => event.stopPropagation());
+    snd.addEventListener("click", () => {
+      touch();
+      hear(ctl.heard === self ? null : self);
+    });
+    goLive.addEventListener("click", () => {
+      touch();
+      move(self, now(), false); // in sync, every camera
+    });
     btn.addEventListener("pointerdown", (event) => event.stopPropagation());
     btn.addEventListener("click", () => {
       touch();
@@ -1733,6 +1775,7 @@ function scrubView(source, alertAt, barSlot) {
       sync: ctl.sync,
       last: ctl.last?.camera ?? null,
       focus: ctl.focus?.camera ?? null,
+      heard: ctl.heard?.camera ?? null,
       lanes: lanes.map((l) => ({ camera: l.camera, place: l.place, anchor: l.anchor, added: l.added, t: l.t, follow: l.follow, full: l.full })),
     }),
     adopt(state, addRow) {
@@ -1751,6 +1794,7 @@ function scrubView(source, alertAt, barSlot) {
       ctl.sync = state.sync;
       ctl.last = lanes.find((l) => l.camera === state.last) ?? null;
       ctl.refocus = lanes.find((l) => l.camera === state.focus) ?? null; // once it is on the page
+      hear(lanes.find((l) => l.camera === state.heard) ?? null);
       drawBar();
     },
     // The row was closed or the card left the page: nothing plays, streams or waits.
