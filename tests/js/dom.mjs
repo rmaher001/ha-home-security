@@ -34,6 +34,17 @@ class Element extends Node {
   getAttribute(name) {
     return this.attributes.has(name) ? this.attributes.get(name) : null;
   }
+  removeAttribute(name) {
+    this.attributes.delete(name);
+    if (name === "src") this.src = ""; // what an image or video shows goes with it
+  }
+  get parentNode() {
+    return this.parent;
+  }
+  focus() {
+    globalThis.document.activeElement = this;
+    this.dispatch("focus");
+  }
   addEventListener(type, fn) {
     if (!this._listeners.has(type)) this._listeners.set(type, []);
     this._listeners.get(type).push(fn);
@@ -99,7 +110,22 @@ let pendingTag = null;
 const registry = new Map();
 
 export function install() {
+  // The cards' players keep a frame timer and some long waits; none of them keeps Node
+  // running after the tests (a test's own short waits still do).
+  const realInterval = globalThis.setInterval;
+  globalThis.setInterval = (...args) => {
+    const timer = realInterval(...args);
+    timer?.unref?.();
+    return timer;
+  };
+  const realTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = (fn, ms, ...rest) => {
+    const timer = realTimeout(fn, ms, ...rest);
+    if (ms > 2000) timer?.unref?.();
+    return timer;
+  };
   globalThis.Node = Node;
+  globalThis.IntersectionObserver = IntersectionObserver;
   globalThis.HTMLElement = HTMLElement;
   globalThis.window = globalThis;
   globalThis.customElements = {
@@ -122,6 +148,29 @@ export function install() {
       }
     },
   };
+}
+
+// What the page shows of an element, as an IntersectionObserver reports it: `intersect(node,
+// visible)` tells every observer watching that node.
+const observers = new Set();
+class IntersectionObserver {
+  constructor(callback) {
+    this.callback = callback;
+    this.targets = new Set();
+    observers.add(this);
+  }
+  observe(target) {
+    this.targets.add(target);
+  }
+  disconnect() {
+    this.targets.clear();
+    observers.delete(this);
+  }
+}
+export function intersect(target, visible) {
+  for (const observer of [...observers]) {
+    if (observer.targets.has(target)) observer.callback([{ target, isIntersecting: visible }]);
+  }
 }
 
 // Put an element on the page, as the browser would.

@@ -29,6 +29,15 @@
 // A source may also have clipUrl(id, stop) -> Promise<url>, the recording around one stop
 // (video/mp4): without it the visit view has no play buttons. And liveUrl(camera) -> url, where
 // the "Watch live" button goes (default: unifi-protect://protect/devices/<camera>).
+// A source may also have, all five together, footage for a camera through time (the engine's
+// page does): footageUrl(camera, minute, quality) -> Promise<url>, one minute of video/mp4
+// (minute: the epoch second it starts on; quality "low" or "full"); frameUrl(camera, at) ->
+// Promise<url>, a JPEG of the recording at an epoch second; detections(camera, start, end) ->
+// Promise<[{start, end|null, types: [...], sound}]>, epoch seconds; cameras() ->
+// Promise<[{id, name, place}]>; and liveStreamUrl(camera) -> Promise<url>, the camera now as
+// multipart/x-mixed-replace JPEGs. Each stop with a camera is then a player scrubbed through
+// time (a stop's `camera_time` is where it starts, else its `time`), in place of its
+// thumbnail and Watch live.
 
 const LEVELS = {
   safety: { label: "SAFETY", word: "Safety", color: "#C62828" },
@@ -82,8 +91,9 @@ const STYLE = `
   .v-shot img, .v-shot video { display: block; width: 100%; height: 100%; object-fit: cover; }
   .v-play { position: absolute; inset: 0; display: grid; place-items: center; width: 100%; padding: 0; border: 0; background: none; }
   .v-disc { display: grid; place-items: center; border-radius: 50%; background: rgba(0, 0, 0, .55); border: 1.5px solid rgba(255, 255, 255, .85); }
-  .v-play .v-disc { width: 56px; height: 56px; }
-  .v-tri { width: 0; height: 0; border-style: solid; border-color: transparent transparent transparent #fff; border-width: 10px 0 10px 17px; margin-left: 4px; }
+  .v-play { place-items: end start; }
+  .v-play .v-disc { width: 22px; height: 22px; margin: 9px; border-width: 1px; }
+  .v-tri { width: 0; height: 0; border-style: solid; border-color: transparent transparent transparent #fff; border-width: 4px 0 4px 7px; margin-left: 2px; }
   .v-caption { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 16px 0;
     font-size: 14px; color: var(--secondary-text-color, #616161); }
   .v-live { display: inline-flex; align-items: center; gap: 7px; min-height: 36px; padding: 0 14px; box-sizing: border-box;
@@ -114,10 +124,69 @@ const STYLE = `
   .v-thumb { position: relative; display: block; width: 168px; max-width: 100%; margin: 6px 0 0; padding: 0; border: 0; background: #37474F;
     border-radius: 6px; overflow: hidden; aspect-ratio: 16 / 9; }
   .v-thumb img { display: block; width: 100%; height: 100%; object-fit: cover; }
-  .v-thumb .v-disc { position: absolute; left: 8px; bottom: 8px; width: 28px; height: 28px; }
-  .v-thumb .v-tri { border-width: 6px 0 6px 10px; margin-left: 2px; }
+  .v-thumb .v-disc { position: absolute; left: 6px; bottom: 6px; width: 22px; height: 22px; border-width: 1px; }
   .v-clip { margin: 6px 0 0; max-width: 360px; }
   .v-clip video { display: block; width: 100%; aspect-ratio: 16 / 9; background: #000; border-radius: 6px; }
+  .s-bar { position: sticky; top: 0; z-index: 2; margin: 0 0 8px; padding: 2px 0 8px; background: var(--ha-card-background, var(--card-background-color, #fff)); }
+  .s-bar.s-on { border-bottom: 1px solid var(--hs-rule); }
+  .s-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .s-sync { display: inline-flex; align-items: center; gap: 10px; min-height: 44px; padding: 0 4px 0 0; background: none; border: 0; color: var(--primary-text-color, #212121); font: inherit; font-size: 15px; font-weight: 600; cursor: pointer; }
+  .s-track { position: relative; flex-shrink: 0; width: 44px; height: 26px; border-radius: 13px; background: var(--hs-rule); transition: background .15s; }
+  .s-thumb { position: absolute; top: 3px; left: 3px; width: 20px; height: 20px; border-radius: 50%; background: #fff; transition: left .15s ease; }
+  .s-on .s-track { background: var(--hs-family); }
+  .s-on .s-thumb { left: 21px; }
+  .s-line, .s-add { min-height: 36px; padding: 0 14px; border-radius: 18px; background: transparent; border: 1.5px solid var(--hs-rule); color: var(--primary-text-color, #212121); font: inherit; font-size: 14px; font-weight: 600; cursor: pointer; }
+  .s-add { min-height: 44px; border-style: dashed; color: var(--hs-family); }
+  .s-shared { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 6px; }
+  .s-big { display: block; font-size: 26px; line-height: 1.1; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .s-sub { display: block; margin-top: 2px; font-size: 13px; color: var(--secondary-text-color, #616161); }
+  .s-red { color: var(--hs-stranger); }
+  .s-all { min-height: 40px; padding: 0 16px; border-radius: 20px; background: var(--hs-family); border: 0; color: #10202b; font: inherit; font-size: 14px; font-weight: 650; cursor: pointer; }
+  .s-player { position: relative; max-width: 360px; margin: 8px 0 0; }
+  .s-player.s-full { max-width: none; width: calc(100% + 112px); margin-left: -112px; }
+  .s-pic { position: relative; aspect-ratio: 16 / 9; overflow: hidden; border-radius: 6px; background: #37474F; touch-action: pan-y; user-select: none; -webkit-user-select: none; cursor: grab; }
+  .s-pic video, .s-pic img { position: absolute; inset: 0; display: block; width: 100%; height: 100%; object-fit: cover; }
+  .s-pic img { -webkit-user-drag: none; user-select: none; }
+  .s-hint { position: absolute; left: 50%; top: 50%; z-index: 1; transform: translate(-50%, -50%); min-height: 36px; padding: 0 14px; border-radius: 18px; background: rgba(0, 0, 0, .6); border: 0; color: #fff; font: inherit; font-size: 13px; white-space: nowrap; cursor: pointer; }
+  .s-note { position: absolute; right: 6px; bottom: 6px; z-index: 1; padding: 2px 6px; border-radius: 6px; background: rgba(0, 0, 0, .55); color: #fff; font-size: 11px; }
+  .v-clip, .v-clip-slot { position: relative; }
+  .v-ctl { position: absolute; bottom: 0; z-index: 1; display: grid; place-items: center; width: 40px; height: 40px; padding: 0; background: none; border: 0; cursor: pointer; }
+  .v-ctl-play { left: 0; }
+  .v-ctl-sound { right: 0; }
+  .v-spk { position: relative; width: 4px; height: 6px; margin-right: 4px; background: #fff; }
+  .v-spk::after { content: ""; position: absolute; left: 2px; top: -2px; border-style: solid; border-width: 5px 5px 5px 0; border-color: transparent #fff transparent transparent; transform: scaleX(-1); }
+  .v-spk.v-muted::before { content: ""; position: absolute; left: -2px; top: 2px; width: 12px; height: 1.5px; background: #fff; transform: rotate(-45deg); }
+  .s-mark { position: absolute; right: 5px; top: 4px; z-index: 1; display: flex; align-items: center; gap: 4px; padding: 1px 5px; border-radius: 6px; background: rgba(0, 0, 0, .45); color: #fff; font-size: 10px; font-weight: 650; }
+  .s-mark::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: var(--hs-stranger); }
+  .s-btn { position: absolute; left: 0; bottom: 0; z-index: 1; display: grid; place-items: center; width: 40px; height: 40px; padding: 0; background: none; border: 0; cursor: pointer; }
+  .s-disc { display: grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; background: rgba(0, 0, 0, .45); }
+  .s-playing .s-btn { opacity: .45; }
+  .s-tri { width: 0; height: 0; border-style: solid; border-color: transparent transparent transparent #fff; border-width: 4px 0 4px 7px; margin-left: 2px; }
+  .s-bars { box-sizing: border-box; width: 8px; height: 8px; border-left: 2px solid #fff; border-right: 2px solid #fff; }
+  .s-tape { position: relative; height: 34px; margin-top: 6px; overflow: hidden; touch-action: pan-y; user-select: none; -webkit-user-select: none; cursor: grab; }
+  .s-base { position: absolute; left: 0; right: 0; top: 22px; height: 1px; background: var(--hs-rule); }
+  .s-strip { position: absolute; top: 0; bottom: 0; left: -100%; width: 300%; will-change: transform; }
+  .s-strip > span { position: absolute; }
+  .s-future { top: 0; bottom: 0; right: 0; border-left: 2px solid var(--hs-stranger); background: repeating-linear-gradient(135deg, rgba(127, 127, 127, .18) 0 4px, transparent 4px 8px); }
+  .s-tick-m { top: 18px; width: 1px; height: 5px; background: var(--secondary-text-color, #616161); opacity: .5; }
+  .s-tick-m.s-big-m { top: 14px; height: 9px; opacity: .9; }
+  .s-label { top: 25px; transform: translateX(-50%); font-size: 9px; line-height: 1; white-space: nowrap; font-variant-numeric: tabular-nums; color: var(--secondary-text-color, #616161); }
+  .s-det { width: 3px; margin-left: -1px; border-radius: 1px; }
+  .s-det.s-person { top: 2px; height: 12px; background: var(--primary-text-color, #212121); }
+  .s-det.s-other { top: 7px; height: 7px; background: var(--secondary-text-color, #616161); }
+  .s-det.s-sound { top: 8px; width: 5px; height: 5px; margin-left: -2px; border-radius: 50%; background: var(--secondary-text-color, #616161); }
+  .s-stop { top: 0; width: 0; height: 0; margin-left: -5px; border-style: solid; border-width: 6px 5px 0 5px; border-color: var(--hs-alerted) transparent transparent transparent; }
+  .s-alert { top: 0; bottom: 4px; width: 2px; margin-left: -1px; background: var(--hs-alerted); }
+  .s-head { position: absolute; left: calc(50% - 1px); top: 0; bottom: 4px; width: 2px; border-radius: 1px; background: var(--primary-text-color, #212121); }
+  .s-key { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; opacity: 0; }
+  .s-key:focus-visible + .s-head { background: var(--hs-family); }
+  .s-read { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin-top: 2px; }
+  .s-clock { font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .s-rel { font-size: 13px; white-space: nowrap; color: var(--secondary-text-color, #616161); }
+  .s-addrow { margin: 0 0 14px 112px; }
+  .s-picks { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+  .s-pick { min-height: 40px; padding: 0 14px; border-radius: 20px; background: rgba(127, 127, 127, .15); border: 0; color: var(--primary-text-color, #212121); font: inherit; font-size: 14px; cursor: pointer; }
+  @media (prefers-reduced-motion: reduce) { .s-track, .s-thumb { transition: none; } }
   .v-note { display: block; margin-top: 4px; font-size: 13px; color: var(--secondary-text-color, #616161); }
   .v-every { text-align: left; margin: 0 0 0 104px; padding: 0; min-height: 44px; background: none; border: 0; color: var(--hs-family); font-size: 14px; }
   .v-looks { padding: 0 16px 8px; }
@@ -434,6 +503,7 @@ function parseVisit(raw) {
       names: parseNames(stop.names),
       picture: Number.isInteger(stop.picture) && stop.picture >= 0 && stop.picture <= 9999 ? stop.picture : null,
       camera: textOf(stop.camera),
+      cameraTime: textOf(stop.camera_time),
       alerted: stop.alerted === true,
     });
   });
@@ -485,9 +555,28 @@ function playInPlace(clips, host, source, story, stop, shown, className, onState
     busy = true;
     try {
       const url = await source.clipUrl(story.id, stop.index);
-      const video = el("video", { controls: true, playsinline: true, autoplay: true, preload: "auto", "aria-label": `Recording${stop.place ? `: ${stop.place}` : ""}` });
+      // No browser controls: they cover the picture on a phone. A small play/pause button and
+      // a sound button sit in the corners instead, and a tap on the video pauses or plays it.
+      const video = el("video", { playsinline: true, autoplay: true, preload: "auto", "aria-label": `Recording${stop.place ? `: ${stop.place}` : ""}` });
       video.muted = true;
       video.src = url;
+      const toggle = () => (video.paused ? video.play?.()?.catch?.(() => {}) : video.pause?.());
+      video.addEventListener("click", toggle);
+      const glyph = el("span", { class: "s-bars" });
+      const playButton = el("button", { class: "v-ctl v-ctl-play", type: "button", "aria-label": "Pause the recording" }, el("span", { class: "s-disc" }, glyph));
+      playButton.addEventListener("click", toggle);
+      const showPlaying = (on) => {
+        glyph.setAttribute("class", on ? "s-bars" : "s-tri");
+        playButton.setAttribute("aria-label", on ? "Pause the recording" : "Play the recording");
+      };
+      video.addEventListener("play", () => showPlaying(true));
+      for (const type of ["pause", "ended"]) video.addEventListener(type, () => showPlaying(false));
+      const soundButton = el("button", { class: "v-ctl v-ctl-sound", type: "button", "aria-pressed": "false", "aria-label": "Sound" }, el("span", { class: "s-disc" }, el("span", { class: "v-spk v-muted" })));
+      soundButton.addEventListener("click", () => {
+        video.muted = !video.muted;
+        soundButton.setAttribute("aria-pressed", video.muted ? "false" : "true");
+        soundButton.querySelector("span")?.querySelector("span")?.setAttribute("class", video.muted ? "v-spk v-muted" : "v-spk");
+      });
       const set = (on) => onState?.(on);
       video.addEventListener("playing", () => set(true));
       for (const type of ["pause", "ended"]) {
@@ -508,7 +597,7 @@ function playInPlace(clips, host, source, story, stop, shown, className, onState
         other.pause?.();
       }
       clips.videos.add(video);
-      host.replaceChildren(video);
+      host.replaceChildren(video, playButton, soundButton);
       if (className) host.setAttribute("class", className);
       set(true);
       // A refused play leaves nothing playing: let the card settle.
@@ -521,11 +610,1009 @@ function playInPlace(clips, host, source, story, stop, shown, className, onState
   };
 }
 
+// --- A camera through time on the event page ---------------------------------------------------
+// Each stop with a camera becomes a player: drag the picture or the tape under it sideways to
+// move that camera through time, back as far as Protect keeps footage and forward to Live.
+// Footage comes a minute at a time (low quality while scrubbing); a still fills in while a
+// minute loads; the tape marks Protect's detections. "Keep in sync" moves every camera
+// together. Times here are epoch seconds.
+
+const SCRUB_WINDOW_S = 120; // how much time the tape shows across its width
+// Protect's recording of a minute is whole 40 s after it ends (the engine refuses it sooner);
+// 5 s more here, for a phone whose clock runs a little ahead of the engine's.
+const SETTLE_S = 45;
+const TICK_BLOCK_S = 600; // detections are asked for ten minutes at a time
+const TICK_FRESH_S = 30; // the block holding now is asked again this often, near Live
+const RETRY_S = 30; // a minute or a block of detections that failed waits this long
+const FULL_AFTER_S = 5; // steady playback before the full-width camera goes to full quality
+const STILL_AFTER_MS = 150; // a scrub resting this long gets a still while its minute loads
+const FRAME_MS = 50; // how often a playing or gliding player is redrawn
+const SCRUB_TAP_PX = 6; // a touch that moves less than this is a tap
+const GLIDE_GAP_MS = 80; // a drag that stopped this long before letting go doesn't glide
+const IDLE_MS = 3000; // a newer version of the visit waits until the cameras are left alone
+const LIVE_MAX = 3; // Live streams open at once: the app's proxy has six connections in all
+const LIVE_QUIET_MS = 5000; // a Live stream that sends no picture this long has stopped
+const STALL_STEP_S = 30; // after a stall, steady playback this long before full quality again,
+const STALL_MAX_S = 120; // doubling with each stall, up to this
+const TICKS_AFTER_MS = 1500; // detections wait for the first picture, or this long
+const PREFETCH_BYTES = 65535; // the next minute's first bytes: enough for the engine to fetch it
+const STRIP = 3; // the tape's strip is three windows wide, so most moves only slide it
+
+// The start of the minute a moment falls in: the footage it is asked for by.
+function minuteOf(t) {
+  return Math.floor(t / 60) * 60;
+}
+
+// Live until Protect has the moment's whole minute.
+function isLive(t, now) {
+  return minuteOf(t) + 60 > now - SETTLE_S;
+}
+
+// Where a moment sits on a tape centred on `t`, in percent of its width.
+function tapeLeft(at, t, windowS) {
+  return 50 + ((at - t) / windowS) * 100;
+}
+
+// The tape's marks: every 10 s with each minute big, or on a wide scale every minute with
+// every fifth big (the scale is the tape's window; `windowS` is how much the marks cover).
+// Nothing after now.
+function tapeMarks(t, windowS, now, scale = windowS) {
+  const step = scale <= 180 ? 10 : 60;
+  const big = scale <= 180 ? 60 : 300;
+  const marks = [];
+  for (let at = Math.ceil((t - windowS / 2) / step) * step; at <= t + windowS / 2; at += step) {
+    if (at > now) break;
+    marks.push({ at, left: tapeLeft(at, t, windowS), big: at % big === 0 });
+  }
+  return marks;
+}
+
+// The detections on a tape centred on `t`: each where it starts (or at the tape's edge, for
+// one already going), as a person (tall), a sound (a dot) or anything else (short).
+function ticksIn(list, t, windowS) {
+  const first = t - windowS / 2;
+  const last = t + windowS / 2;
+  return list
+    .filter((d) => (d.end ?? Infinity) >= first && d.start <= last)
+    .map((d) => ({
+      at: d.start,
+      left: tapeLeft(Math.max(d.start, first), t, windowS),
+      kind: d.sound ? "sound" : (d.types || []).some((k) => k === "person" || k === "face") ? "person" : "other",
+    }));
+}
+
+// Every camera's time after one moves: in sync they all go with it.
+function syncTimes(times, lane, value, sync) {
+  return times.map((t, i) => (sync || i === lane ? value : t));
+}
+
+// Whole parts of a multipart stream (each part's headers give its Content-Length), and what
+// is left over for the next read.
+const CRLF2 = [13, 10, 13, 10];
+function multipartParts(buffer) {
+  const parts = [];
+  let at = 0;
+  for (;;) {
+    let end = -1;
+    for (let i = at; i + 3 < buffer.length; i++) {
+      if (buffer[i] === CRLF2[0] && buffer[i + 1] === CRLF2[1] && buffer[i + 2] === CRLF2[2] && buffer[i + 3] === CRLF2[3]) {
+        end = i;
+        break;
+      }
+    }
+    if (end < 0) break;
+    const head = new TextDecoder().decode(buffer.subarray(at, end));
+    const length = /content-length:\s*(\d+)/i.exec(head);
+    if (!length) {
+      at = end + 4; // headers with no length: skipped
+      continue;
+    }
+    const start = end + 4;
+    const size = Number(length[1]);
+    if (buffer.length < start + size) break;
+    parts.push(buffer.slice(start, start + size));
+    at = start + size;
+  }
+  return { parts, rest: buffer.slice(at) };
+}
+
+const epochOf = (iso) => {
+  const ms = typeof iso === "string" ? Date.parse(iso) : NaN;
+  return Number.isFinite(ms) ? ms / 1000 : null;
+};
+const clockOf = (t) => new Date(t * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" });
+const shortClockOf = (t) =>
+  new Date(t * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }).replace(/\s?[AP]M$/i, "");
+
+function spanWords(seconds) {
+  const s = Math.round(Math.abs(seconds));
+  if (s < 60) return `${s} s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m} min${s % 60 ? ` ${s % 60} s` : ""}`;
+  return `${Math.floor(m / 60)} h ${m % 60} min`;
+}
+
+function relWords(t, anchor, what) {
+  const d = t - anchor;
+  if (Math.abs(d) < 1.5) return what;
+  return `${spanWords(d)} ${d < 0 ? "before" : "after"}`;
+}
+
+const canScrub = (source) =>
+  ["footageUrl", "frameUrl", "detections", "cameras", "liveStreamUrl"].every((name) => typeof source[name] === "function");
+
+const attached = (node, parent) => node.parentNode === parent;
+function show(node, parent, on) {
+  if (on && !attached(node, parent)) parent.append(node);
+  if (!on && node.parentNode) node.remove();
+}
+const setText = (node, text) => {
+  if (node.textContent !== text) node.replaceChildren(text);
+};
+
+// The players for a visit, and the bar that keeps them in sync. `alertAt` is the moment the
+// guard alerted (null when it didn't): Line up puts every camera there. The bar goes into
+// `barSlot` once there is a camera. Nothing loads until resume(): a version of the visit that
+// is held back, or thrown away, costs nothing.
+function scrubView(source, alertAt, barSlot) {
+  const lanes = [];
+  const ticks = new Map(); // a camera -> {asked: Map(block start -> {at, ok}), list, version, redraw}
+  const ctl = { sync: false, last: null, playAll: false, timer: null, vel: 0, glider: null, held: 0, paused: true, disposed: false, active: 0, idleTimer: null, onIdle: null, focus: null, refocus: null };
+  const live = new Set(); // the lanes with a Live stream open
+  const now = () => Date.now() / 1000;
+  let observer = null;
+
+  // The bar: Keep in sync, Line up at the alert (when it alerted), and in sync the shared
+  // clock and Play all.
+  const thumb = el("span", { class: "s-thumb" });
+  const syncButton = el("button", { class: "s-sync", type: "button", "aria-pressed": "false" }, el("span", { class: "s-track" }, thumb), el("span", {}, "Keep in sync"));
+  const lineUp = alertAt === null ? null : el("button", { class: "s-line", type: "button" }, "Line up at the alert");
+  const sharedClock = el("span", { class: "s-big" });
+  const sharedRel = el("span", { class: "s-sub" });
+  const playAllWord = el("span", {}, "Play all");
+  const playAll = el("button", { class: "s-all", type: "button", "aria-label": "Play every camera together" }, playAllWord);
+  const shared = el("div", { class: "s-shared" }, el("div", {}, sharedClock, sharedRel), playAll);
+  const row = el("div", { class: "s-row" }, syncButton, lineUp);
+  const bar = el("div", { class: "s-bar" }, row);
+
+  const drawBar = () => {
+    syncButton.setAttribute("aria-pressed", ctl.sync ? "true" : "false");
+    bar.setAttribute("class", ctl.sync ? "s-bar s-on" : "s-bar");
+    show(shared, bar, ctl.sync);
+    const lane = ctl.last ?? lanes[0];
+    if (!ctl.sync || !lane) return;
+    setText(sharedClock, lane.live ? "Live" : clockOf(lane.t));
+    sharedClock.setAttribute("class", lane.live ? "s-big s-red" : "s-big");
+    const rel = lane.live ? "every camera, now" : alertAt === null ? "" : relWords(lane.t, alertAt, "the moment the guard alerted").replace(/ (before|after)$/, " $1 the alert");
+    setText(sharedRel, rel);
+    setText(playAllWord, ctl.playAll ? "Pause" : "Play all");
+    playAll.setAttribute("aria-label", ctl.playAll ? "Pause every camera" : "Play every camera together");
+  };
+
+  // The owner is doing something: a newer version of the visit waits until 3 s after.
+  const busy = () => ctl.held > 0 || ctl.vel !== 0 || lanes.some((lane) => lane.playing);
+  const idle = () => !busy() && Date.now() - ctl.active >= IDLE_MS;
+  // A newer version is waiting (ctl.onIdle): look again once the cameras could be idle, and
+  // again after that for as long as they are in use.
+  const watchIdle = () => {
+    clearTimeout(ctl.idleTimer);
+    ctl.idleTimer = null;
+    if (!ctl.onIdle || ctl.paused) return;
+    const wait = busy() ? IDLE_MS : Math.max(0, IDLE_MS - (Date.now() - ctl.active));
+    ctl.idleTimer = setTimeout(() => {
+      ctl.idleTimer = null;
+      if (!idle()) return watchIdle();
+      const then = ctl.onIdle;
+      ctl.onIdle = null;
+      then?.();
+    }, wait + 10);
+  };
+  const touch = () => {
+    ctl.active = Date.now();
+    watchIdle();
+  };
+  const needsFrames = () => ctl.vel !== 0 || lanes.some((lane) => lane.playing || lane.live);
+  const run = () => {
+    if (ctl.paused || ctl.timer || !needsFrames()) return;
+    ctl.timer = setInterval(frame, FRAME_MS);
+  };
+  const stop = () => {
+    clearInterval(ctl.timer);
+    ctl.timer = null;
+  };
+  function frame() {
+    if (ctl.vel !== 0 && ctl.glider) {
+      const glider = ctl.glider;
+      move(glider, glider.t + ctl.vel * FRAME_MS, true);
+      ctl.vel *= 0.9;
+      if (Math.abs(ctl.vel) < 0.02) endGlide();
+    }
+    for (const lane of lanes) lane.tick();
+    drawBar();
+    if (!needsFrames()) stop();
+  }
+  function endGlide() {
+    const glider = ctl.glider;
+    ctl.vel = 0;
+    ctl.glider = null;
+    for (const lane of ctl.sync ? lanes : glider ? [glider] : []) lane.draw(false); // the exact frame
+  }
+
+  // Move a camera (and, in sync, all of them) to a moment, never past now. Only a camera
+  // whose time changed is redrawn.
+  function move(lane, value, dragging) {
+    const t = Math.min(now(), Math.max(0, value));
+    const times = syncTimes(lanes.map((l) => l.t), lanes.indexOf(lane), t, ctl.sync);
+    lanes.forEach((l, i) => {
+      if (times[i] === l.t && l !== lane) return;
+      l.t = times[i];
+      l.follow = false; // where it was taken; draw() says whether that is Live
+      l.draw(dragging);
+    });
+    ctl.last = lane;
+    drawBar();
+    run();
+  }
+
+  syncButton.addEventListener("click", () => {
+    touch();
+    ctl.sync = !ctl.sync;
+    if (!ctl.sync) setPlayAll(false);
+    const lane = ctl.last ?? lanes[0];
+    if (ctl.sync && lane) move(lane, lane.t, false);
+    drawBar();
+  });
+  lineUp?.addEventListener("click", () => {
+    if (!lanes.length) return;
+    touch();
+    ctl.sync = true;
+    move(ctl.last ?? lanes[0], alertAt, false);
+  });
+  function setPlayAll(on) {
+    ctl.playAll = on;
+    for (const lane of lanes) (on ? lane.play() : lane.pause());
+    drawBar();
+  }
+  playAll.addEventListener("click", () => {
+    touch();
+    setPlayAll(!ctl.playAll);
+  });
+
+  // Live streams: at most LIVE_MAX open, cameras on screen first. A camera without one shows
+  // "Live — tap to watch"; tapping it takes the stream of one off screen, or the oldest.
+  let evicting = false;
+  function grantLive(lane, force) {
+    if (live.has(lane)) return true;
+    if (live.size >= LIVE_MAX) {
+      const off = [...live].find((l) => !l.visible) ?? (force ? [...live][0] : null);
+      if (!off || (!force && !lane.visible)) return false;
+      evicting = true; // its slot is this lane's: freeLive passes it to no one else
+      try {
+        off.closeLive("waiting");
+      } finally {
+        evicting = false;
+      }
+    }
+    live.add(lane);
+    return true;
+  }
+  function freeLive(lane) {
+    if (!live.delete(lane) || evicting) return;
+    const next = lanes.find((l) => l.live && l.liveState === "waiting" && l.visible) ?? lanes.find((l) => l.live && l.liveState === "waiting");
+    if (next && !ctl.paused) next.openLive(false);
+  }
+  const rebalance = () => {
+    for (const lane of lanes) if (lane.live && lane.liveState === "waiting" && lane.visible) lane.openLive(false);
+  };
+
+  // Detections for a camera around a moment: the ten-minute block it is in and one either
+  // side, each asked for once (a failed one again after RETRY_S; the block holding now every
+  // TICK_FRESH_S while this camera is near now). None for a block wholly in the future.
+  function want(camera, t, redraw) {
+    let held = ticks.get(camera);
+    if (!held) ticks.set(camera, (held = { asked: new Map(), list: [], version: 0, redraw: new Set() }));
+    held.redraw.add(redraw);
+    const n = now();
+    const block = Math.floor(t / TICK_BLOCK_S) * TICK_BLOCK_S;
+    for (const start of [block - TICK_BLOCK_S, block, block + TICK_BLOCK_S]) {
+      if (start > n) continue;
+      const asked = held.asked.get(start);
+      const holdsNow = start + TICK_BLOCK_S > n && Math.abs(n - t) < SCRUB_WINDOW_S;
+      if (asked && !(asked.ok === false && n - asked.at >= RETRY_S) && !(asked.ok && holdsNow && n - asked.at >= TICK_FRESH_S)) continue;
+      if (asked?.ok === null) continue; // still on its way
+      const mine = { at: n, ok: null };
+      held.asked.set(start, mine);
+      Promise.resolve()
+        .then(() => source.detections(camera, start, start + TICK_BLOCK_S))
+        .then(
+          (found) => {
+            mine.ok = true;
+            let added = 0;
+            for (const d of Array.isArray(found) ? found : []) {
+              if (typeof d?.start !== "number" || !Number.isFinite(d.start)) continue;
+              const types = Array.isArray(d.types) ? d.types.filter((k) => typeof k === "string") : [];
+              const known = held.list.find((o) => o.start === d.start && String(o.types) === String(types));
+              if (known) {
+                if (known.end === null && typeof d.end === "number") {
+                  known.end = d.end; // it has ended since
+                  added++;
+                }
+                continue;
+              }
+              held.list.push({ start: d.start, end: typeof d.end === "number" ? d.end : null, types, sound: d.sound === true });
+              added++;
+            }
+            if (!added || ctl.paused) return;
+            held.version++;
+            for (const draw of [...held.redraw]) draw();
+          },
+          () => {
+            mine.ok = false;
+            mine.at = now();
+          },
+        );
+    }
+    return held;
+  }
+
+  // One camera's player. `anchor` is its stop's moment (for one added: when it was added).
+  function lane({ camera, place, anchor, added }) {
+    const name = place || "Camera";
+    const self = { camera, place, anchor, added: added === true, t: anchor, follow: false, playing: false, live: false, liveState: null, full: false, quality: "low", key: null, steady: null, visible: true, ticksReady: false };
+    const video = el("video", { class: "s-video", playsinline: true, muted: true, preload: "auto", "aria-label": `${name} footage` });
+    video.muted = true;
+    video.playsInline = true;
+    const still = el("img", { class: "s-still", alt: "", draggable: "false" });
+    const liveImg = el("img", { class: "s-live", alt: `${name}, live`, draggable: "false" });
+    const liveMark = el("span", { class: "s-mark" }, "Live");
+    const hint = el("button", { class: "s-hint", type: "button" });
+    const note = el("span", { class: "s-note" });
+    const glyph = el("span", { class: "s-tri" });
+    const btn = el("button", { class: "s-btn", type: "button", "aria-label": `Play ${name}` }, el("span", { class: "s-disc" }, glyph));
+    const pic = el("div", { class: "s-pic" }, video, btn);
+    const strip = el("div", { class: "s-strip" });
+    const future = el("span", { class: "s-future" });
+    const keys = el("input", { class: "s-key", type: "range", step: "5", min: "0", "aria-label": `${name}: move through time` });
+    const tape = el("div", { class: "s-tape" }, el("span", { class: "s-base" }), strip, keys, el("span", { class: "s-head" }));
+    const clock = el("span", { class: "s-clock" });
+    const rel = el("span", { class: "s-rel" });
+    const player = el("div", { class: "s-player" }, pic, tape, el("div", { class: "s-read" }, clock, rel));
+    const failed = new Map(); // a minute's key -> when it couldn't be had
+    let stillTimer = null;
+    let deadTimer = null;
+    let ticksTimer = null;
+    let fetched = null; // the next minute, asked for ahead
+    let liveSince = null; // when the stream last showed a picture
+    let liveToken = 0;
+    let liveAbort = null; // closes the stream being read
+    let livePicture = null; // the object URL shown, let go when the next one comes
+    let stalls = 0; // full quality stalled this often: it waits longer each time
+    let srcKey = null; // the minute the video's source is
+    let stripKey = null;
+    let centre = null;
+    const redrawTicks = () => self.drawTape(true);
+
+    const playerClass = () => `s-player${self.full ? " s-full" : ""}${self.playing ? " s-playing" : ""}`;
+    const offset = () => Math.min(59.9, Math.max(0, self.t - minuteOf(self.t)));
+    const seek = (dragging) => {
+      if (!(video.readyState >= 1)) return;
+      if (dragging && typeof video.fastSeek === "function") video.fastSeek(offset());
+      else video.currentTime = offset();
+    };
+    const say = (words) => {
+      setText(note, words || "");
+      show(note, pic, Boolean(words));
+    };
+
+    // The minute under the centre line, at the quality wanted. One that couldn't be had is
+    // not asked for again for RETRY_S; the lane says so meanwhile.
+    async function load() {
+      const minute = minuteOf(self.t);
+      const key = `${minute}-${self.quality}`;
+      if (self.key === key) return;
+      const missed = failed.get(key);
+      if (missed !== undefined && now() - missed < RETRY_S) {
+        say("Couldn't load this minute.");
+        return;
+      }
+      self.key = key;
+      say("");
+      try {
+        const url = await source.footageUrl(camera, minute, self.quality);
+        if (self.key !== key || ctl.paused) return;
+        srcKey = key;
+        video.src = url;
+        video.load?.();
+      } catch {
+        if (self.key === key) miss(key);
+      }
+    }
+    function miss(key) {
+      failed.set(key, now());
+      if (self.key === key) self.key = null;
+      self.steady = null;
+      say("Couldn't load this minute.");
+    }
+    video.addEventListener("loadedmetadata", () => {
+      seek(false);
+      if (self.playing) video.play?.()?.catch?.(() => {});
+    });
+    video.addEventListener("loadeddata", () => {
+      if (srcKey !== null) failed.delete(srcKey); // it loaded after all
+      say("");
+      readyForTicks();
+    });
+    video.addEventListener("seeked", () => show(still, pic, false));
+    video.addEventListener("playing", () => {
+      self.steady = now();
+      show(still, pic, false);
+      say("");
+    });
+    video.addEventListener("waiting", () => {
+      self.steady = null;
+      // Not keeping up at full quality: back to low, from where it was, and longer before
+      // trying full again.
+      if (self.quality === "full") {
+        stalls++;
+        self.quality = "low";
+        self.draw(false);
+      }
+    });
+    video.addEventListener("seeking", () => (self.steady = null));
+    video.addEventListener("ended", () => {
+      // The next minute, or Live once there is no more.
+      if (!self.playing) return;
+      const loaded = Number.parseInt(self.key ?? "", 10); // the minute that ended
+      self.t = (Number.isFinite(loaded) ? loaded : minuteOf(self.t)) + 60;
+      self.draw(false);
+    });
+    // A minute that fails: a 425 means Protect is still writing it (Live, then); anything
+    // else waits RETRY_S.
+    video.addEventListener("error", async () => {
+      const key = self.key;
+      if (key === null || ctl.paused) return;
+      let status = 0;
+      try {
+        if (typeof fetch === "function" && video.src) status = (await fetch(video.src, { headers: { Range: "bytes=0-0" } })).status;
+      } catch {
+        /* no answer: counted as a miss */
+      }
+      if (self.key !== key || ctl.paused) return;
+      if (status === 425) {
+        self.key = null;
+        self.follow = true;
+        self.draw(false);
+        return;
+      }
+      miss(key);
+    });
+    const wantStill = () => {
+      clearTimeout(stillTimer);
+      stillTimer = setTimeout(async () => {
+        if (self.live || video.readyState >= 2 || ctl.paused) return;
+        try {
+          const url = await source.frameUrl(camera, Math.floor(self.t));
+          if (self.live || ctl.paused) return;
+          still.src = url;
+          show(still, pic, true);
+        } catch {
+          /* the footage is still coming: nothing in between */
+        }
+      }, STILL_AFTER_MS);
+    };
+    function readyForTicks() {
+      if (self.ticksReady) return;
+      self.ticksReady = true;
+      clearTimeout(ticksTimer);
+      self.drawTape(true);
+    }
+
+    // Live: the stream, while it has a slot and keeps showing pictures.
+    self.openLive = async (force) => {
+      if (!self.live || ctl.paused) return;
+      if (!grantLive(self, force)) {
+        self.closeLive("waiting");
+        return;
+      }
+      const token = ++liveToken;
+      const stale = () => token !== liveToken || !self.live || ctl.paused;
+      const abort = new AbortController();
+      liveAbort = abort;
+      self.liveState = "opening";
+      show(hint, pic, false);
+      // No picture for LIVE_QUIET_MS (or none at all): it has stopped.
+      const quiet = () => {
+        clearTimeout(deadTimer);
+        deadTimer = setTimeout(() => {
+          if (token === liveToken) self.closeLive("dead");
+        }, LIVE_QUIET_MS);
+      };
+      try {
+        const url = await source.liveStreamUrl(camera);
+        if (stale()) return;
+        const answer = await fetch(url, { signal: abort.signal });
+        if (stale()) return;
+        if (!answer.ok || !answer.body) throw new Error("no Live stream");
+        const reader = answer.body.getReader();
+        let buffer = new Uint8Array(0);
+        quiet();
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (stale()) return;
+          if (done) break;
+          const joined = new Uint8Array(buffer.length + value.length);
+          joined.set(buffer);
+          joined.set(value, buffer.length);
+          const { parts, rest } = multipartParts(joined);
+          buffer = rest;
+          if (!parts.length) continue;
+          // The newest picture only; the one before is let go.
+          const shown = URL.createObjectURL(new Blob([parts.at(-1)], { type: "image/jpeg" }));
+          if (livePicture) URL.revokeObjectURL(livePicture);
+          livePicture = shown;
+          liveImg.src = shown;
+          liveSince = now();
+          if (self.liveState !== "open") {
+            self.liveState = "open";
+            show(liveImg, pic, true);
+            show(liveMark, pic, true);
+            readyForTicks();
+            self.drawRead();
+          }
+          quiet();
+        }
+        if (!stale()) self.closeLive("dead"); // the stream ended
+      } catch {
+        if (token === liveToken && self.live && !ctl.paused) self.closeLive("dead");
+      }
+    };
+    // Close the stream; `state` is what the lane shows instead: "waiting" for a slot, "dead"
+    // when it stopped, or null when it isn't Live any more.
+    self.closeLive = (state) => {
+      liveToken++;
+      clearTimeout(deadTimer);
+      liveAbort?.abort();
+      liveAbort = null;
+      liveImg.removeAttribute("src");
+      if (livePicture) URL.revokeObjectURL(livePicture);
+      livePicture = null;
+      show(liveImg, pic, false);
+      show(liveMark, pic, false);
+      freeLive(self);
+      self.liveState = state;
+      if (state === "waiting") setText(hint, "Live — tap to watch");
+      else if (state === "dead") setText(hint, `Live stopped${liveSince ? ` at ${clockOf(liveSince)}` : ""}. Try again`);
+      show(hint, pic, state !== null);
+      self.drawRead();
+    };
+    hint.addEventListener("pointerdown", (event) => event.stopPropagation());
+    hint.addEventListener("click", () => {
+      touch();
+      self.openLive(true);
+    });
+    function setLive(on) {
+      if (on === self.live) return;
+      self.live = on;
+      if (on) {
+        video.pause?.();
+        show(video, pic, false);
+        show(still, pic, false);
+        say("");
+        self.openLive(false);
+      } else {
+        self.closeLive(null);
+        // The video goes back first, under the button and the marks.
+        pic.replaceChildren(video, ...Array.from(pic.childNodes).filter((n) => n !== video));
+      }
+    }
+
+    self.drawRead = () => {
+      const dead = self.live && self.liveState === "dead";
+      setText(clock, dead ? clockOf(liveSince ?? self.t) : self.live ? "Live" : clockOf(self.t));
+      clock.setAttribute("class", self.live && !dead ? "s-clock s-red" : "s-clock");
+      setText(rel, dead ? "Live stopped" : self.live ? "now" : relWords(self.t, self.anchor, self.added ? "when added" : "when they got here"));
+      keys.max = String(Math.floor(now()));
+      keys.value = String(Math.round(self.t / 5) * 5);
+      keys.setAttribute("aria-valuetext", self.live ? "Live" : clockOf(self.t));
+    };
+
+    // The tape: a strip three windows wide, built around a centre and slid under the line;
+    // built again only when the time leaves it, new detections come, or now passes a mark.
+    self.drawTape = (force) => {
+      if (ctl.paused) return; // asleep: nothing asked for, nothing drawn
+      const n = now();
+      const W = SCRUB_WINDOW_S;
+      if (centre === null || Math.abs(self.t - centre) > W * 0.9) centre = Math.round(self.t / 10) * 10;
+      const span = W * STRIP;
+      const held = self.ticksReady ? want(camera, self.t, redrawTicks) : null;
+      const nearNow = centre + span / 2 > n;
+      const key = `${centre}|${held?.version ?? -1}|${nearNow ? Math.floor(n / 10) : ""}`;
+      if (force || key !== stripKey) {
+        stripKey = key;
+        const nodes = [future];
+        for (const m of tapeMarks(centre, span, n, W)) {
+          nodes.push(el("span", { class: m.big ? "s-tick-m s-big-m" : "s-tick-m", style: `left:${m.left}%` }));
+          if (m.big) nodes.push(el("span", { class: "s-label", style: `left:${m.left}%` }, shortClockOf(m.at)));
+        }
+        for (const k of held ? ticksIn(held.list, centre, span) : []) {
+          nodes.push(el("span", { class: `s-det s-${k.kind}`, style: `left:${k.left}%` }));
+        }
+        if (!self.added && Math.abs(self.anchor - centre) <= span / 2) {
+          nodes.push(el("span", { class: "s-stop", style: `left:${tapeLeft(self.anchor, centre, span)}%` }));
+        }
+        if (alertAt !== null && Math.abs(alertAt - centre) <= span / 2) {
+          nodes.push(el("span", { class: "s-alert", style: `left:${tapeLeft(alertAt, centre, span)}%` }));
+        }
+        strip.replaceChildren(...nodes);
+      }
+      const futureLeft = tapeLeft(n, centre, span);
+      future.style.cssText = futureLeft < 100 ? `left:${Math.max(0, futureLeft)}%` : "display:none";
+      strip.style.cssText = `transform:translateX(${(-(self.t - centre) / span) * 100}%)`;
+    };
+
+    self.draw = (dragging) => {
+      if (ctl.paused) return;
+      const n = now();
+      if (self.follow) self.t = n;
+      const isNow = isLive(self.t, n);
+      if (isNow) {
+        self.follow = true; // Live goes on with time
+        self.t = n;
+      }
+      setLive(isNow);
+      if (!isNow) {
+        load();
+        if (dragging || !self.playing) seek(dragging); // playing, the video is where it plays
+        if (dragging) wantStill();
+      }
+      self.drawTape(false);
+      self.drawRead();
+      // The next minute's first bytes, asked for ahead so the engine has it fetched when
+      // playback gets there (low quality only: full is fetched when wanted).
+      if (!isNow && self.playing && self.quality === "low" && offset() > 40 && typeof fetch === "function") {
+        const next = minuteOf(self.t) + 60;
+        if (fetched !== next && !isLive(next, n)) {
+          fetched = next;
+          Promise.resolve(source.footageUrl(camera, next, "low"))
+            .then((url) => fetch(url, { headers: { Range: `bytes=0-${PREFETCH_BYTES}` } }))
+            .then((answer) => answer.body?.cancel?.())
+            .catch(() => {});
+        }
+      }
+    };
+
+    // While playing, time comes from the video; the full-width camera steps up in quality
+    // once playback has been steady a while. Live redraws once a second.
+    let drawnAt = 0;
+    self.tick = () => {
+      if (self.playing && !self.live && self.key !== null && self.key === srcKey && video.readyState >= 1) {
+        // Within the minute loaded: its end belongs to "ended", which goes on to the next.
+        self.t = Number.parseInt(self.key, 10) + Math.min(59.9, video.currentTime || 0);
+      }
+      const after = stalls ? Math.min(STALL_MAX_S, STALL_STEP_S * 2 ** (stalls - 1)) : FULL_AFTER_S;
+      if (self.full && self.playing && !self.live && self.quality === "low" && self.steady !== null && now() - self.steady >= after) {
+        self.quality = "full";
+        self.draw(false);
+        return;
+      }
+      if (self.playing) self.draw(false);
+      else if (self.live && Math.floor(now()) !== drawnAt) {
+        drawnAt = Math.floor(now());
+        self.draw(false);
+      }
+    };
+
+    self.play = () => {
+      self.playing = true;
+      glyph.setAttribute("class", "s-bars");
+      btn.setAttribute("aria-label", `Pause ${name}`);
+      player.setAttribute("class", playerClass());
+      video.muted = ctl.last !== self; // sound only from the camera last touched
+      if (!self.live && !ctl.paused) {
+        load();
+        video.play?.()?.catch?.(() => {});
+      }
+      run();
+    };
+    self.pause = () => {
+      self.playing = false;
+      self.steady = null;
+      video.pause?.();
+      video.muted = true;
+      glyph.setAttribute("class", "s-tri");
+      btn.setAttribute("aria-label", `Play ${name}`);
+      player.setAttribute("class", playerClass());
+    };
+    // Paused with the row: nothing plays and nothing streams; Live comes back on resume.
+    self.sleep = () => {
+      self.pause();
+      clearTimeout(stillTimer);
+      clearTimeout(ticksTimer);
+      video.removeAttribute("src"); // nothing held open: asked for again on waking
+      video.load?.();
+      self.key = null;
+      srcKey = null;
+      if (self.live) {
+        self.live = false;
+        self.closeLive(null);
+        pic.replaceChildren(video, ...Array.from(pic.childNodes).filter((n) => n !== video));
+      }
+    };
+    self.wake = () => {
+      if (!self.ticksReady) {
+        clearTimeout(ticksTimer);
+        ticksTimer = setTimeout(readyForTicks, TICKS_AFTER_MS);
+      }
+      self.draw(false);
+    };
+    self.setFull = (on) => {
+      self.full = on;
+      if (!on && self.quality === "full") {
+        self.quality = "low";
+        self.draw(false);
+      }
+      player.setAttribute("class", playerClass());
+    };
+    self.player = player;
+    self.pic = pic;
+
+    btn.addEventListener("pointerdown", (event) => event.stopPropagation());
+    btn.addEventListener("click", () => {
+      touch();
+      ctl.last = self;
+      if (self.playing) self.pause();
+      else self.play();
+    });
+    keys.addEventListener("focus", () => {
+      ctl.focus = self;
+      touch();
+    });
+    keys.addEventListener("blur", () => {
+      if (ctl.focus === self) ctl.focus = null;
+    });
+    self.keys = keys;
+    keys.addEventListener("input", (event) => {
+      const value = Number((event.target ?? event.currentTarget)?.value);
+      if (!Number.isFinite(value)) return;
+      touch();
+      move(self, value, false);
+    });
+
+    // Drag on the picture or the tape. Up and down still scrolls the page (touch-action).
+    const drag = (area, onPicture) => {
+      let held = null;
+      const release = () => {
+        if (held) ctl.held = Math.max(0, ctl.held - 1);
+        held = null;
+      };
+      area.addEventListener("pointerdown", (event) => {
+        if (event.button) return;
+        const width = area.getBoundingClientRect?.().width || 300;
+        const stoppedGlide = ctl.glider !== null;
+        if (stoppedGlide) endGlide();
+        held = { x: event.clientX, t0: self.t, spp: SCRUB_WINDOW_S / width, moved: false, lastX: event.clientX, lastAt: event.timeStamp ?? Date.now(), vel: 0, stoppedGlide };
+        ctl.held++;
+        touch();
+        area.setPointerCapture?.(event.pointerId);
+      });
+      area.addEventListener("pointermove", (event) => {
+        if (!held) return;
+        const dx = event.clientX - held.x;
+        if (!held.moved && Math.abs(dx) <= SCRUB_TAP_PX) return;
+        if (!held.moved) {
+          held.moved = true;
+          for (const l of ctl.sync ? lanes : [self]) {
+            l.pause();
+            if (l.quality === "full") l.quality = "low"; // scrubbing is at low quality
+          }
+          ctl.playAll = false;
+        }
+        touch();
+        const at = event.timeStamp ?? Date.now();
+        held.vel = (-(event.clientX - held.lastX) * held.spp) / Math.max(1, at - held.lastAt);
+        held.lastX = event.clientX;
+        held.lastAt = at;
+        move(self, held.t0 - dx * held.spp, true);
+      });
+      area.addEventListener("pointerup", (event) => {
+        const was = held;
+        release();
+        if (!was) return;
+        touch();
+        if (!was.moved) {
+          if (onPicture && !was.stoppedGlide) self.setFull(!self.full); // a tap; not one that stopped a glide
+          return;
+        }
+        // A flick glides on; a drag that stopped before letting go doesn't.
+        if ((event.timeStamp ?? Date.now()) - was.lastAt <= GLIDE_GAP_MS && was.vel !== 0) {
+          ctl.vel = was.vel;
+          ctl.glider = self;
+          run();
+        } else {
+          for (const l of ctl.sync ? lanes : [self]) l.draw(false); // the exact frame
+        }
+      });
+      area.addEventListener("pointercancel", () => {
+        const was = held;
+        release();
+        ctl.vel = 0;
+        ctl.glider = null;
+        if (was) for (const l of ctl.sync ? lanes : [self]) l.draw(false);
+      });
+    };
+    drag(pic, true);
+    drag(tape, false);
+    return self;
+  }
+
+  const view = {
+    bar,
+    lanes,
+    // A player for a camera, added to the visit's lanes (drawn once the view is resumed).
+    add(spec) {
+      const one = lane(spec);
+      lanes.push(one);
+      if (spec.follow) one.follow = true;
+      if (ctl.sync && ctl.last) {
+        one.t = ctl.last.t;
+        one.follow = ctl.last.follow;
+      }
+      if (lanes.length === 1) barSlot?.append(bar);
+      if (observer) observer.observe(one.pic);
+      if (!ctl.paused) {
+        one.wake();
+        drawBar();
+        run();
+      }
+      return one;
+    },
+    shownCameras: () => new Set(lanes.map((l) => l.camera)),
+    // Where the cameras are: the one last touched, or the first; for an added camera when
+    // there is none yet, a minute before now.
+    now: () => (ctl.last ?? lanes[0])?.t ?? now() - 60,
+    following: () => (ctl.last ?? lanes[0])?.follow ?? false,
+    touch,
+    // A newer version of the visit waits while the owner is using the cameras: true until
+    // they have been left alone IDLE_MS. `then` is called once they have.
+    active(then) {
+      if (idle()) {
+        ctl.onIdle = null;
+        return false;
+      }
+      const waiting = ctl.onIdle !== null && ctl.idleTimer !== null;
+      ctl.onIdle = then;
+      if (!waiting) watchIdle();
+      return true;
+    },
+    // What a newer version takes over: each camera's time, sync, full width, the cameras
+    // added.
+    carry: () => ({
+      sync: ctl.sync,
+      last: ctl.last?.camera ?? null,
+      focus: ctl.focus?.camera ?? null,
+      lanes: lanes.map((l) => ({ camera: l.camera, place: l.place, anchor: l.anchor, added: l.added, t: l.t, follow: l.follow, full: l.full })),
+    }),
+    adopt(state, addRow) {
+      if (!state) return;
+      const used = new Set();
+      for (const was of state.lanes) {
+        let one = lanes.find((l) => !used.has(l) && l.camera === was.camera && !l.added);
+        if (!one && was.added) one = addRow({ camera: was.camera, place: was.place, anchor: was.anchor, added: true });
+        if (!one) continue;
+        used.add(one);
+        one.t = was.t;
+        one.follow = was.follow;
+        one.full = was.full;
+        one.player.setAttribute("class", `s-player${one.full ? " s-full" : ""}`);
+      }
+      ctl.sync = state.sync;
+      ctl.last = lanes.find((l) => l.camera === state.last) ?? null;
+      ctl.refocus = lanes.find((l) => l.camera === state.focus) ?? null; // once it is on the page
+      drawBar();
+    },
+    // The row was closed or the card left the page: nothing plays, streams or waits.
+    pause() {
+      if (ctl.paused) return;
+      ctl.paused = true;
+      ctl.vel = 0;
+      ctl.glider = null;
+      ctl.playAll = false;
+      ctl.held = 0;
+      clearTimeout(ctl.idleTimer);
+      ctl.idleTimer = null;
+      for (const l of lanes) l.sleep();
+      stop();
+      observer?.disconnect();
+      observer = null;
+      drawBar();
+    },
+    // Shown (again): each camera picks up where it was, Live again if it was following now.
+    resume() {
+      if (ctl.disposed || !ctl.paused) return;
+      ctl.paused = false;
+      if (typeof IntersectionObserver === "function") {
+        observer = new IntersectionObserver((entries) => {
+          for (const entry of entries) {
+            const one = lanes.find((l) => l.pic === entry.target);
+            if (one) one.visible = entry.isIntersecting;
+          }
+          rebalance();
+        });
+        for (const l of lanes) observer.observe(l.pic);
+      }
+      for (const l of lanes) l.wake();
+      drawBar();
+      run();
+      watchIdle(); // a newer version that was waiting looks again
+      const refocus = ctl.refocus;
+      ctl.refocus = null;
+      if (refocus) setTimeout(() => refocus.keys.focus?.(), 0); // after the swap is painted
+    },
+    dispose() {
+      view.pause();
+      ctl.disposed = true;
+    },
+  };
+  return view;
+}
+
+// "Add a camera": the cameras not shown yet, as buttons; one picked joins at the moment the
+// others are at. `addRow(spec)` puts its player on the route.
+function addCameraRow(source, view, addRow) {
+  const picks = el("div", { class: "s-picks" });
+  const open = el("button", { class: "s-add", type: "button", "aria-expanded": "false" }, "Add a camera");
+  const row = el("div", { class: "s-addrow" }, open);
+  const close = () => {
+    open.setAttribute("aria-expanded", "false");
+    picks.remove();
+  };
+  open.addEventListener("click", async () => {
+    view.touch();
+    if (open.getAttribute("aria-expanded") === "true") {
+      close();
+      return;
+    }
+    open.setAttribute("aria-expanded", "true");
+    let cameras = [];
+    try {
+      cameras = await source.cameras();
+    } catch {
+      picks.replaceChildren(el("span", { class: "v-note" }, "Couldn't load the cameras."));
+      row.append(picks);
+      return;
+    }
+    const shown = view.shownCameras();
+    const spare = (Array.isArray(cameras) ? cameras : []).filter((c) => textOf(c?.id) && !shown.has(c.id));
+    picks.replaceChildren(
+      ...spare.map((c) => {
+        const name = textOf(c.place) || textOf(c.name) || c.id;
+        const pick = el("button", { class: "s-pick", type: "button" }, name);
+        pick.addEventListener("click", () => {
+          view.touch();
+          addRow({ camera: c.id, place: name, anchor: view.now(), added: true, follow: view.following() });
+          close();
+        });
+        return pick;
+      }),
+    );
+    if (!spare.length) picks.replaceChildren(el("span", { class: "v-note" }, "Every camera is shown."));
+    row.append(picks);
+  });
+  row.isOpen = () => open.getAttribute("aria-expanded") === "true";
+  row.reopen = () => open.click?.() ?? open.dispatch?.("click"); // (dispatch: the tests' DOM)
+  return row;
+}
+
 // The visit view for a guard detail that has one. The pieces are built once per story
 // version (so a push never reloads a picture or stops a playing recording); the That's fine
 // button goes in `fineSlot`, which the card fills each time it draws.
 function visitBlock(source, story, data, visit, learn, kept) {
   const canPlay = typeof source.clipUrl === "function";
+  // Each camera through time, when the source has footage (the engine's page does).
+  const here = visit.here;
+  const alertAt = epochOf(here?.cameraTime || here?.time);
+  const barSlot = el("div", { class: "s-slot" });
+  const scrub = canScrub(source) ? scrubView(source, here ? alertAt : null, barSlot) : null;
   const clips = { videos: new Set(), settle: () => block.onSettle?.() };
   const urls = new Map(); // a picture number -> its URL request, asked for once
   const pictureUrl = (n) => {
@@ -551,7 +1638,6 @@ function visitBlock(source, story, data, visit, learn, kept) {
     pictureUrl(n).then((src) => (picture.src = src), fail);
     return picture;
   };
-  const here = visit.here;
   const trial = visit.trial ?? (typeof story.title === "string" && story.title.startsWith("Trial:"));
 
   // The state line: when it alerted (or, if it didn't, when the visit was).
@@ -599,7 +1685,7 @@ function visitBlock(source, story, data, visit, learn, kept) {
   const figure = [shot];
   if (here) {
     const caption = el("div", { class: "v-caption" }, captionText);
-    if (camera) {
+    if (camera && !scrub) {
       const target = typeof source.liveUrl === "function" ? source.liveUrl(camera) : `unifi-protect://protect/devices/${encodeURIComponent(camera)}`;
       caption.append(el("a", { class: "v-live", href: target, target: "_blank", rel: "noopener" }, "Watch live"));
     }
@@ -631,7 +1717,10 @@ function visitBlock(source, story, data, visit, learn, kept) {
     }
     if (stop.names.length) lines.push(el("p", { class: "v-what" }, whoLine(stop.names, true)));
     let media = null;
-    if (stop.picture !== null && typeof source.stepPictureUrl === "function") {
+    const anchor = scrub && stop.camera ? epochOf(stop.cameraTime || stop.time) : null;
+    if (anchor !== null) {
+      media = scrub.add({ camera: stop.camera, place: stop.place, anchor }).player;
+    } else if (stop.picture !== null && typeof source.stepPictureUrl === "function") {
       const thumb = stepPicture(stop.picture);
       if (canPlay) {
         const slot = el("div", { class: "v-clip-slot" });
@@ -684,8 +1773,26 @@ function visitBlock(source, story, data, visit, learn, kept) {
     every = holder;
   }
 
+  const routeList = el("ol", {}, route);
+  let addUI = null;
+  // A camera added by the owner: its own row at the end of the route.
+  const addRow = (spec) => {
+    const one = scrub.add(spec);
+    routeList.append(
+      el("li", { class: "v-stop" }, el("span", { class: "v-time" }, "Added"), el("span", { class: "v-line" }), el("div", {}, el("div", { class: "v-place" }, spec.place), one.player)),
+    );
+    return one;
+  };
+  if (scrub) addUI = addCameraRow(source, scrub, addRow);
   const routeSection = visit.stops.length
-    ? el("section", { class: "v-route", "aria-label": "The way they came" }, el("h4", {}, "The way they came"), el("ol", {}, route))
+    ? el(
+        "section",
+        { class: "v-route", "aria-label": "The way they came" },
+        el("h4", {}, "The way they came"),
+        scrub ? barSlot : null,
+        routeList,
+        addUI,
+      )
     : null;
   const block = el(
     "div",
@@ -705,11 +1812,25 @@ function visitBlock(source, story, data, visit, learn, kept) {
   block.state = viewState;
   // Whether a recording is playing (or about to), which the card waits out before it swaps
   // this block for a newer one; and pausing them all, for when the row is closed.
-  block.active = () => [...clips.videos].some((video) => !video.paused && !video.ended);
+  // Cameras being looked through count too, until they have been left alone a few seconds;
+  // then the newer version comes in where they were (carry, adopt).
+  block.active = () => [...clips.videos].some((video) => !video.paused && !video.ended) || Boolean(scrub?.active(() => block.onSettle?.()));
   block.pause = () => {
     for (const video of clips.videos) {
       video.pause?.();
     }
+    scrub?.pause();
+  };
+  // Shown or shown again: the cameras pick up where they were. Replaced: nothing stays open.
+  block.resume = () => scrub?.resume();
+  block.dispose = () => {
+    block.pause();
+    scrub?.dispose();
+  };
+  block.carry = () => (scrub ? { ...scrub.carry(), picker: addUI.isOpen() } : null);
+  block.adopt = (state) => {
+    scrub?.adopt(state, addRow);
+    if (state?.picker && addUI && !addUI.isOpen()) addUI.reopen();
   };
   return block;
 }
@@ -866,6 +1987,14 @@ class HsWeek extends HsElement {
     this._current = new Map(); // story id -> the block on screen for it
     this._drafts = new Map(); // story id -> Map(box key -> typed text)
   }
+  disconnectedCallback() {
+    super.disconnectedCallback();
+    for (const block of this._current.values()) block.pause?.(); // off the page: nothing plays or streams
+  }
+  connectedCallback() {
+    super.connectedCallback();
+    if (this._open !== null) this._current.get(this._open)?.resume?.();
+  }
   _draftsFor(id) {
     let drafts = this._drafts.get(id);
     if (!drafts) this._drafts.set(id, (drafts = new Map()));
@@ -881,6 +2010,7 @@ class HsWeek extends HsElement {
     const source = this._source;
     if (story.kind !== "guard" || typeof source?.detail !== "function") return null;
     if (this._detailSource !== source) {
+      for (const block of this._current.values()) block.dispose?.(); // nothing of the old source stays open
       this._detailSource = source;
       this._details = new Map();
       this._drafts = new Map();
@@ -898,11 +2028,17 @@ class HsWeek extends HsElement {
       // The same version asked for again (after a learn answer): only the learn section is
       // new, so it goes into the block on screen, which keeps playing whatever it was playing.
       shown.learnHost.replaceChildren(...Array.from(entry.block.learnHost.childNodes));
+      entry.block.dispose?.();
       entry.block = shown;
     } else if (entry.loaded && entry.block !== shown && !shown?.active?.()) {
+      if (shown && shown !== entry.block) {
+        entry.block?.adopt?.(shown.carry?.()); // the cameras stay where the owner left them
+        shown.dispose?.(); // no Live stream left open behind it
+      }
       if (entry.block) {
-        entry.block.onSettle = () => this._draw();
+        entry.block.onSettle = () => this.isConnected && this._draw();
         this._current.set(story.id, entry.block);
+        if (this._open === story.id && this.isConnected) entry.block.resume?.();
       } else {
         this._current.delete(story.id);
       }
@@ -942,9 +2078,12 @@ class HsWeek extends HsElement {
     this._fetchDetail(this._source, story, pictureKey(story), entry);
   }
   _toggle(story, wasOpen) {
+    const before = this._open;
     this._open = wasOpen ? null : story.id;
+    if (!wasOpen && before !== null && before !== story.id) this._current.get(before)?.pause?.(); // one row at a time
     if (wasOpen) this._current.get(story.id)?.pause?.(); // a closed row plays nothing
     if (!wasOpen) this._reopened(story);
+    if (!wasOpen) this._current.get(story.id)?.resume?.(); // a reopened row's cameras go on
     this._draw();
   }
   _render() {
@@ -1019,7 +2158,11 @@ class HsWeek extends HsElement {
     for (const key of this._details.keys()) if (!listed.has(key)) this._details.delete(key);
     const ids = new Set(stories.map((story) => story.id));
     for (const id of this._drafts.keys()) if (!ids.has(id)) this._drafts.delete(id);
-    for (const id of this._current.keys()) if (!ids.has(id)) this._current.delete(id);
+    for (const [id, block] of this._current) {
+      if (ids.has(id)) continue;
+      block.dispose?.();
+      this._current.delete(id);
+    }
     this._paint(
       el(
         "div",

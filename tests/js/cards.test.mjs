@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs";
 import { test, beforeEach, afterEach } from "node:test";
 import vm from "node:vm";
 
-import { connect, install } from "./dom.mjs";
+import { connect, install, intersect } from "./dom.mjs";
 
 install();
 vm.runInThisContext(
@@ -1192,14 +1192,18 @@ test("the engine's reason for refusing a Keep is shown", async () => {
 
 // ---- Typed words survive the story moving on ----
 
-// A focus() that records which box was asked, since the test DOM has none.
+// A focus() that records which box was asked; restore() puts the test DOM's own back.
 function recordFocus(box) {
   const proto = Object.getPrototypeOf(box);
   const calls = [];
+  const own = Object.getOwnPropertyDescriptor(proto, "focus");
   proto.focus = function (options) {
     calls.push([this, options]);
   };
-  return { calls, restore: () => delete proto.focus };
+  return {
+    calls,
+    restore: () => (own ? Object.defineProperty(proto, "focus", own) : delete proto.focus),
+  };
 }
 
 test("what is typed in a box, and its focus, survive the story's `updated` moving", async () => {
@@ -1579,7 +1583,17 @@ test("tapping the big picture's play button swaps the picture for a video at the
   const videos = week.shadowRoot.querySelectorAll("video");
   assert.equal(videos.length, 1);
   assert.equal(videos[0].src, "/clip/gV/1");
-  assert.equal(videos[0].getAttribute("controls"), "");
+  // No browser controls over the picture (they cover the video on a phone): a tap on the
+  // video pauses it, and another plays it again.
+  assert.equal(videos[0].getAttribute("controls"), null);
+  let calls = [];
+  videos[0].pause = () => calls.push("pause");
+  videos[0].play = () => (calls.push("play"), Promise.resolve());
+  videos[0].paused = false;
+  videos[0].dispatch("click");
+  videos[0].paused = true;
+  videos[0].dispatch("click");
+  assert.deepEqual(calls, ["pause", "play"]);
   assert.equal(videos[0].getAttribute("playsinline"), "");
   assert.equal(videos[0].getAttribute("autoplay"), "");
   assert.deepEqual(source.clipAsked, [["gV", 1]]);
@@ -2263,4 +2277,1717 @@ test("a newer version with no detail takes the old visit view away", async () =>
   assert.ok(!texts(week).includes("Maple and Rowan at the garage"));
   assert.equal(week.shadowRoot.querySelectorAll("li").length, 0);
   assert.ok(texts(week).includes("Someone at the garage."));
+});
+
+// --- A camera through time on the event page --------------------------------------------------
+
+test("a minute is the start of the minute a moment falls in", () => {
+  assert.equal(minuteOf(1793761234), 1793761200);
+  assert.equal(minuteOf(1793761200), 1793761200);
+  assert.equal(minuteOf(1793761259.9), 1793761200);
+});
+
+test("a moment is Live until Protect has its whole minute: 40 s after it ends, and 5 s to spare", () => {
+  const minute = 1793761200;
+  assert.equal(isLive(minute + 30, minute + 104), true); // the minute ended 44 s ago
+  assert.equal(isLive(minute + 30, minute + 105), false); // 45 s: it is whole
+  assert.equal(isLive(minute - 1, minute + 104), false);
+});
+
+test("the tape's marks fall every 10 s, minutes marked big, and none past now", () => {
+  const t = 1793761230; // 30 s into a minute
+  const marks = tapeMarks(t, 120, t + 1000);
+  assert.equal(marks.length, 13); // t-60 .. t+60, every 10 s
+  assert.deepEqual(marks[0], { at: t - 60, left: 0, big: false });
+  assert.deepEqual(marks.find((m) => m.at === 1793761200), { at: 1793761200, left: 25, big: true });
+  assert.equal(marks[6].left, 50); // the moment under the centre line
+  // Only what has happened: nothing after now.
+  assert.deepEqual(tapeMarks(t, 120, t + 5).map((m) => m.at).at(-1), t);
+  // A wide tape marks every minute, five-minute marks big.
+  const wide = tapeMarks(1793761200, 600, 1793770000);
+  assert.ok(wide.every((m) => m.at % 60 === 0));
+  assert.ok(wide.filter((m) => m.big).every((m) => m.at % 300 === 0));
+});
+
+test("only the detections on the tape show, each as a person, a sound or something else", () => {
+  const t = 1793761200;
+  const list = [
+    { start: t - 100, end: t - 70, types: ["person"], sound: false }, // ended before the tape
+    { start: t - 75, end: t - 50, types: ["vehicle"], sound: false }, // runs onto it
+    { start: t + 30, end: null, types: ["face", "person"], sound: false }, // still going
+    { start: t + 12, end: t + 14, types: ["alrmBark"], sound: true },
+    { start: t + 61, end: t + 70, types: ["person"], sound: false }, // after the tape
+  ];
+  assert.deepEqual(ticksIn(list, t, 120), [
+    { at: t - 75, left: 0, kind: "other" },
+    { at: t + 30, left: 75, kind: "person" },
+    { at: t + 12, left: 60, kind: "sound" },
+  ]);
+});
+
+test("in sync every camera takes the new time; alone only the one moved", () => {
+  assert.deepEqual(syncTimes([1, 2, 3], 1, 9, false), [1, 9, 3]);
+  assert.deepEqual(syncTimes([1, 2, 3], 1, 9, true), [9, 9, 9]);
+});
+
+function withScrub(source, cameras = [
+  { id: "cam-side", name: "Sidewalk Camera", place: "Sidewalk" },
+  { id: "cam-garage", name: "Garage Camera", place: "Garage" },
+  { id: "cam-patio", name: "Patio Camera", place: "Patio" },
+]) {
+  source.footageAsked = [];
+  source.detectionsAsked = [];
+  source.footageUrl = async (camera, minute, quality) => {
+    source.footageAsked.push([camera, minute, quality]);
+    return `/footage/${camera}/${minute}-${quality}.mp4`;
+  };
+  source.frameUrl = async (camera, at) => `/frame/${camera}/${at}.jpg`;
+  source.detections = async (camera, start, end) => {
+    source.detectionsAsked.push([camera, start, end]);
+    return [];
+  };
+  source.cameras = async () => cameras;
+  source.liveStreamUrl = async (camera) => `/live/${camera}`;
+  return source;
+}
+
+const withClass = (week, tag, cls) =>
+  week.shadowRoot.querySelectorAll(tag).find((n) => (n.getAttribute("class") || "").split(" ").includes(cls));
+const allByClass = (week, tag, cls) =>
+  week.shadowRoot.querySelectorAll(tag).filter((n) => (n.getAttribute("class") || "").split(" ").includes(cls));
+
+test("with a source that has footage, each stop with a camera is a player, with no browser controls", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  const players = allByClass(week, "div", "s-player");
+  assert.equal(players.length, 2); // the kitchen has no camera
+  const videos = players.map((p) => p.querySelector("video"));
+  for (const video of videos) {
+    assert.equal(video.getAttribute("controls"), null);
+    assert.equal(video.getAttribute("playsinline"), "");
+    assert.equal(video.getAttribute("muted"), "");
+  }
+  // Each starts at its own stop's moment: the minute it falls in, at low quality.
+  const side = Date.parse(visitDetail().visit.stops[0].time) / 1000;
+  assert.deepEqual(source.footageAsked[0], ["cam-side", minuteOf(side), "low"]);
+  // The tape, the small play button, and the clock under the picture.
+  assert.equal(allByClass(week, "div", "s-tape").length, 2);
+  assert.equal(allByClass(week, "button", "s-btn").length, 2);
+  assert.equal(allByClass(week, "span", "s-clock").length, 2);
+  // The old thumbnails and Watch live are gone where the players are.
+  assert.equal(allByClass(week, "button", "v-thumb").length, 0);
+  assert.equal(week.shadowRoot.querySelectorAll("a").filter((a) => a.textContent === "Watch live").length, 0);
+});
+
+test("a camera's detections are asked for in ten-minute blocks, once each", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  assert.deepEqual(source.detectionsAsked, []); // not before the first picture shows
+  for (const video of week.shadowRoot.querySelectorAll("video")) video.dispatch("loadeddata");
+  await settle();
+  const side = source.detectionsAsked.filter(([camera]) => camera === "cam-side");
+  assert.equal(side.length, 3); // the block the moment is in, and one either side
+  for (const [, start, end] of side) {
+    assert.equal(start % 600, 0);
+    assert.equal(end - start, 600);
+  }
+  assert.equal(new Set(side.map(([, start]) => start)).size, 3);
+});
+
+test("Keep in sync is off at first; Line up at the alert puts every camera on the alert's moment", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  const sync = withClass(week, "button", "s-sync");
+  assert.equal(sync.getAttribute("aria-pressed"), "false");
+  const clocks = () => allByClass(week, "span", "s-clock").map((c) => c.textContent);
+  assert.notEqual(clocks()[0], clocks()[1]);
+  button(week, "Line up at the alert").dispatch("click");
+  await settle();
+  assert.equal(sync.getAttribute("aria-pressed"), "true");
+  assert.equal(clocks()[0], clocks()[1]);
+  assert.ok(withClass(week, "div", "s-shared"));
+  sync.dispatch("click");
+  assert.equal(sync.getAttribute("aria-pressed"), "false");
+});
+
+test("Add a camera offers the cameras not shown and adds the one picked, at the same moment", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  button(week, "Add a camera").dispatch("click");
+  await settle();
+  assert.equal(button(week, "Sidewalk"), undefined); // already shown
+  const patio = button(week, "Patio");
+  assert.ok(patio);
+  patio.dispatch("click");
+  await settle();
+  assert.equal(allByClass(week, "div", "s-player").length, 3);
+  assert.ok(source.footageAsked.some(([camera]) => camera === "cam-patio"));
+});
+
+test("a stop at a moment Protect hasn't finished recording shows Live, not footage", async () => {
+  const detail = visitDetail();
+  detail.visit.stops[0].time = new Date(Date.now() - 20000).toISOString();
+  const source = withScrub(withClips(withDetail(fakeSource(), detail)));
+  const week = await openVisit(source);
+  await settle();
+  const live = allByClass(week, "img", "s-live");
+  assert.equal(live.length, 1);
+  assert.match(live[0].src, /^blob:/);
+  assert.ok(fetched.some(([url]) => url === "/live/cam-side"));
+  assert.ok(allByClass(week, "span", "s-clock")[0].textContent === "Live");
+  assert.ok(!source.footageAsked.some(([camera]) => camera === "cam-side"));
+});
+
+test("a camera taken to now stays Live as time goes on; one at a past moment stays there", async () => {
+  const detail = visitDetail();
+  const source = withScrub(withClips(withDetail(fakeSource(), detail)));
+  const week = await openVisit(source);
+  const keys = allByClass(week, "input", "s-key");
+  const nowS = Date.now() / 1000;
+  keys[0].dispatch("input", { target: { value: String(Math.floor(nowS) + 60) } }); // past now: now
+  await settle();
+  assert.equal(allByClass(week, "span", "s-clock")[0].textContent, "Live");
+  const later = Date.now;
+  try {
+    Date.now = () => later() + 5 * 60 * 1000; // five minutes on
+    await new Promise((resolve) => setTimeout(resolve, 120)); // a few frames
+    assert.equal(allByClass(week, "span", "s-clock")[0].textContent, "Live");
+    assert.notEqual(allByClass(week, "span", "s-clock")[1].textContent, "Live"); // the garage stayed put
+  } finally {
+    Date.now = later;
+    week._current.get("gV")?.pause();
+  }
+});
+
+// --- the players: lifecycle, gestures, playback, Live -----------------------------------------
+
+function timers() {
+  const made = new Set();
+  const si = globalThis.setInterval;
+  const ci = globalThis.clearInterval;
+  globalThis.setInterval = (...a) => {
+    const t = si(...a);
+    made.add(t);
+    return t;
+  };
+  globalThis.clearInterval = (t) => {
+    made.delete(t);
+    return ci(t);
+  };
+  return {
+    open: () => made.size,
+    restore() {
+      globalThis.setInterval = si;
+      globalThis.clearInterval = ci;
+      for (const t of made) ci(t);
+    },
+  };
+}
+const pdown = (node, x, ts, button = 0) => node.dispatch("pointerdown", { clientX: x, pointerId: 1, button, timeStamp: ts });
+const pmove = (node, x, ts) => node.dispatch("pointermove", { clientX: x, pointerId: 1, timeStamp: ts });
+const pup = (node, x, ts) => node.dispatch("pointerup", { clientX: x, pointerId: 1, timeStamp: ts });
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const lanesOf = (week) => ({
+  pics: allByClass(week, "div", "s-pic"),
+  tapes: allByClass(week, "div", "s-tape"),
+  players: allByClass(week, "div", "s-player"),
+  keys: allByClass(week, "input", "s-key"),
+  clocks: allByClass(week, "span", "s-clock"),
+  btns: allByClass(week, "button", "s-btn"),
+  videos: allByClass(week, "video", "s-video"),
+});
+const timeOf = (week, i) => Number(lanesOf(week).keys[i].value);
+const recentDetail = (seconds = 20) => {
+  const detail = visitDetail();
+  detail.visit.stops[0].time = new Date(Date.now() - seconds * 1000).toISOString();
+  return detail;
+};
+const liveShown = (node) => node.querySelectorAll("img").filter((i) => i.getAttribute("class") === "s-live");
+
+// Live as the engine sends it: multipart JPEGs, each part with its length. `liveStreams` holds
+// every stream opened; push() sends a part, end() ends it, and `aborted` says it was closed.
+const JPEG = new Uint8Array([0xff, 0xd8, 0xff, 0xd9]);
+const bytesOf = (text) => new TextEncoder().encode(text);
+function livePart(jpeg = JPEG) {
+  const head = bytesOf(`--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ${jpeg.length}\r\n\r\n`);
+  const out = new Uint8Array(head.length + jpeg.length + 2);
+  out.set(head);
+  out.set(jpeg, head.length);
+  out.set(bytesOf("\r\n"), head.length + jpeg.length);
+  return out;
+}
+const liveStreams = [];
+let fetched = [];
+function fakeFetch(url, options = {}) {
+  fetched.push([url, options]);
+  if (!String(url).startsWith("/live/")) return Promise.resolve({ ok: false, status: 404, body: null });
+  let control;
+  const stream = { url, aborted: false, push: (part = livePart()) => control.enqueue(part), end: () => control.close() };
+  const body = new ReadableStream({
+    start(c) {
+      control = c;
+      c.enqueue(livePart()); // the first picture at once
+    },
+  });
+  options.signal?.addEventListener("abort", () => {
+    stream.aborted = true;
+    try {
+      control.error(new Error("aborted"));
+    } catch {
+      /* already ended */
+    }
+  });
+  liveStreams.push(stream);
+  return Promise.resolve({ ok: true, status: 200, body });
+}
+globalThis.fetch = fakeFetch;
+const livesOpen = () => liveStreams.filter((x) => !x.aborted);
+function countLive(source) {
+  source.liveOpened = 0;
+  source.liveStreamUrl = async (camera) => {
+    source.liveOpened++;
+    return `/live/${camera}`;
+  };
+  return source;
+}
+async function withClock(fn) {
+  const real = Date.now;
+  let skew = 0;
+  Date.now = () => real() + skew;
+  try {
+    await fn((ms) => (skew += ms));
+  } finally {
+    Date.now = real;
+  }
+}
+
+test("a version thrown away (the same one asked again after a learn answer) opens nothing", async () => {
+  const source = countLive(withScrub(withClips(withDetail(fakeSource(), recentDetail()))));
+  const T = timers();
+  try {
+    const week = await openVisit(source);
+    await settle();
+    const before = source.liveOpened;
+    assert.equal(before, 1);
+    const [key, entry] = [...week._details.entries()][0];
+    await week._fetchDetail(source, week._data.stories[0], key, entry);
+    await settle();
+    await settle();
+    assert.equal(source.liveOpened, before);
+    assert.ok(T.open() <= 1);
+    week._current.get("gV").pause();
+    assert.equal(T.open(), 0);
+  } finally {
+    T.restore();
+  }
+});
+
+test("opening another row puts the first row's cameras to sleep", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), recentDetail())));
+  const week = mount("hs-week", source);
+  source.push([guardStory("gV"), guardStory("gW")]);
+  await settle();
+  const rows = () => week.shadowRoot.querySelectorAll("div").filter((d) => d.getAttribute("role") === "button");
+  rows()[0].dispatch("click");
+  await settle();
+  await settle();
+  const first = week._current.get("gV");
+  assert.equal(liveShown(first).length, 1);
+  rows()[1].dispatch("click");
+  await settle();
+  await settle();
+  assert.equal(liveShown(first).length, 0);
+  week._current.get("gW")?.pause();
+});
+
+test("a card taken off the page stops every camera, and put back picks them up", async () => {
+  const source = countLive(withScrub(withClips(withDetail(fakeSource(), recentDetail()))));
+  const T = timers();
+  try {
+    const week = await openVisit(source);
+    await settle();
+    const block = week._current.get("gV");
+    assert.equal(liveShown(block).length, 1);
+    assert.equal(T.open(), 1);
+    week.disconnectedCallback();
+    assert.equal(T.open(), 0);
+    assert.equal(liveShown(block).length, 0);
+    week.connectedCallback();
+    await settle();
+    assert.equal(liveShown(block).length, 1);
+    block.pause();
+  } finally {
+    T.restore();
+  }
+});
+
+test("dragging one camera moves only that one when not in sync", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  const { pics } = lanesOf(week);
+  pdown(pics[0], 200, 0);
+  pmove(pics[0], 150, 10);
+  pmove(pics[0], 100, 20);
+  pup(pics[0], 100, 25);
+  await wait(600);
+  const a0 = timeOf(week, 0);
+  const b0 = timeOf(week, 1);
+  pdown(pics[1], 100, 5000);
+  pmove(pics[1], 110, 5010);
+  pmove(pics[1], 130, 5020);
+  await wait(200);
+  assert.equal(timeOf(week, 0), a0);
+  assert.ok(timeOf(week, 1) < b0); // dragged right: back in time
+  pup(pics[1], 130, 6000);
+  week._current.get("gV").pause();
+});
+
+test("dragging left goes forward in time, right goes back, by the tape's scale", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  const { tapes } = lanesOf(week);
+  const t0 = timeOf(week, 0);
+  pdown(tapes[0], 300, 0);
+  pmove(tapes[0], 150, 1000); // 150 px of a 300 px tape: half the window, 60 s
+  pup(tapes[0], 150, 2000);
+  assert.equal(timeOf(week, 0) - t0, 60);
+  pdown(tapes[0], 150, 3000);
+  pmove(tapes[0], 300, 4000);
+  pup(tapes[0], 300, 5000);
+  assert.equal(timeOf(week, 0), t0);
+  week._current.get("gV").pause();
+});
+
+test("a touch that moves 6 px or less is a tap: it toggles full width; more is a drag", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  const { pics, players } = lanesOf(week);
+  const t0 = timeOf(week, 0);
+  pdown(pics[0], 100, 0);
+  pmove(pics[0], 106, 10);
+  pup(pics[0], 106, 20);
+  assert.ok(players[0].getAttribute("class").includes("s-full"));
+  assert.equal(timeOf(week, 0), t0);
+  pdown(pics[0], 100, 100);
+  pup(pics[0], 100, 110);
+  assert.ok(!players[0].getAttribute("class").includes("s-full"));
+  const clock0 = lanesOf(week).clocks[0].textContent;
+  pdown(pics[0], 100, 200);
+  pmove(pics[0], 107, 1000); // 7 px: 2.8 s
+  pup(pics[0], 107, 2000);
+  assert.ok(!players[0].getAttribute("class").includes("s-full"));
+  assert.notEqual(lanesOf(week).clocks[0].textContent, clock0);
+  // A tap on the tape is no tap on the picture.
+  pdown(lanesOf(week).tapes[0], 100, 3000);
+  pup(lanesOf(week).tapes[0], 100, 3010);
+  assert.ok(!players[0].getAttribute("class").includes("s-full"));
+  week._current.get("gV").pause();
+});
+
+test("only the main button drags, and the play button is no tap on the picture", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  const { pics, players, btns } = lanesOf(week);
+  const t0 = timeOf(week, 0);
+  pdown(pics[0], 100, 0, 2);
+  pmove(pics[0], 200, 10);
+  pup(pics[0], 200, 20);
+  assert.equal(timeOf(week, 0), t0);
+  let stopped = 0;
+  btns[0].dispatch("pointerdown", { stopPropagation: () => stopped++ });
+  assert.equal(stopped, 1);
+  assert.ok(!players[0].getAttribute("class").includes("s-full"));
+  week._current.get("gV").pause();
+});
+
+test("a flick glides on and slows to a stop; a drag held still before letting go doesn't", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const T = timers();
+  try {
+    const week = await openVisit(source);
+    const { pics } = lanesOf(week);
+    pdown(pics[0], 300, 0);
+    pmove(pics[0], 290, 10);
+    pmove(pics[0], 280, 20); // 0.4 s of footage a millisecond: about 200 s of glide, short of now
+    pup(pics[0], 280, 30);
+    const released = timeOf(week, 0);
+    await wait(150);
+    const later = timeOf(week, 0);
+    assert.ok(later > released, "it glided forward");
+    await wait(1500);
+    assert.equal(T.open(), 0, "and stopped");
+    const settled = timeOf(week, 0);
+    pdown(pics[0], 300, 5000);
+    pmove(pics[0], 250, 5010);
+    pup(pics[0], 250, 5200); // held 190 ms before letting go
+    const placed = timeOf(week, 0);
+    await wait(150);
+    assert.equal(timeOf(week, 0), placed);
+    assert.ok(placed > settled);
+    week._current.get("gV").pause();
+  } finally {
+    T.restore();
+  }
+});
+
+test("a tap that stops a glide stops it, and doesn't toggle full width", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  const { pics, players } = lanesOf(week);
+  pdown(pics[0], 300, 0);
+  pmove(pics[0], 250, 10);
+  pmove(pics[0], 200, 20);
+  pup(pics[0], 200, 30);
+  await wait(60);
+  pdown(pics[0], 200, 100);
+  const caught = timeOf(week, 0);
+  pup(pics[0], 200, 110);
+  await wait(150);
+  assert.equal(timeOf(week, 0), caught);
+  assert.ok(!players[0].getAttribute("class").includes("s-full"));
+  week._current.get("gV").pause();
+});
+
+test("a cancelled drag stops: no glide and no frame timer left running", async () => {
+  const T = timers();
+  try {
+    const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+    const week = await openVisit(source);
+    const { pics } = lanesOf(week);
+    pdown(pics[0], 100, 0);
+    pmove(pics[0], 130, 10);
+    pmove(pics[0], 160, 20);
+    const at = timeOf(week, 0);
+    pics[0].dispatch("pointercancel", {});
+    await wait(200);
+    assert.equal(timeOf(week, 0), at);
+    assert.equal(T.open(), 0);
+    week._current.get("gV").pause();
+  } finally {
+    T.restore();
+  }
+});
+
+test("dragging one camera never seeks another that is playing", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  const { pics, videos, btns } = lanesOf(week);
+  for (const v of videos) v.readyState = 4;
+  let seeks = 0;
+  Object.defineProperty(videos[1], "currentTime", { get: () => 5, set: () => seeks++ });
+  videos[1].fastSeek = () => seeks++;
+  btns[1].dispatch("click");
+  seeks = 0;
+  pdown(pics[0], 200, 0);
+  pmove(pics[0], 150, 10);
+  pmove(pics[0], 100, 30);
+  pup(pics[0], 100, 1000);
+  assert.equal(seeks, 0);
+  week._current.get("gV").pause();
+});
+
+test("in sync, dragging any camera moves them all; sync lines up on the one last touched", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  const { tapes } = lanesOf(week);
+  pdown(tapes[1], 300, 0);
+  pmove(tapes[1], 200, 1000);
+  pup(tapes[1], 200, 2000);
+  const second = timeOf(week, 1);
+  assert.notEqual(timeOf(week, 0), second);
+  withClass(week, "button", "s-sync").dispatch("click");
+  assert.equal(timeOf(week, 0), second);
+  pdown(tapes[0], 300, 3000);
+  pmove(tapes[0], 250, 4000);
+  pup(tapes[0], 250, 5000);
+  assert.equal(timeOf(week, 1), timeOf(week, 0));
+  assert.equal(timeOf(week, 0) - second, 20);
+  week._current.get("gV").pause();
+});
+
+test("Play all plays every camera, with sound only from the one last touched", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  const { btns, videos } = lanesOf(week);
+  const played = [];
+  videos.forEach((v, i) => {
+    v.play = () => (played.push(i), Promise.resolve());
+    v.pause = () => {};
+  });
+  btns[1].dispatch("click"); // touched (and played) the garage
+  btns[1].dispatch("click");
+  withClass(week, "button", "s-sync").dispatch("click");
+  played.length = 0;
+  const all = withClass(week, "button", "s-all");
+  all.dispatch("click");
+  assert.deepEqual(played.sort(), [0, 1]);
+  assert.equal(videos[0].muted, true);
+  assert.equal(videos[1].muted, false);
+  assert.equal(all.textContent, "Pause");
+  all.dispatch("click");
+  assert.equal(all.textContent, "Play all");
+  assert.ok(videos.every((v) => v.muted));
+  week._current.get("gV").pause();
+});
+
+test("a minute that ends while playing goes on to the next", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  const { btns, videos } = lanesOf(week);
+  const side = Date.parse(visitDetail().visit.stops[0].time) / 1000;
+  btns[0].dispatch("click");
+  videos[0].dispatch("ended");
+  await settle();
+  assert.ok(source.footageAsked.some(([camera, minute]) => camera === "cam-side" && minute === minuteOf(side) + 60));
+  week._current.get("gV").pause();
+});
+
+test("a lane paused while its minute loads does not start playing when it arrives", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  const { btns, videos } = lanesOf(week);
+  let plays = 0;
+  videos[0].play = () => (plays++, Promise.resolve());
+  btns[0].dispatch("click");
+  plays = 0;
+  btns[0].dispatch("click");
+  videos[0].dispatch("loadedmetadata");
+  assert.equal(plays, 0);
+  week._current.get("gV").pause();
+});
+
+test("a still fills in only while dragging, and goes once the video has found the frame", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  const stills = () => allByClass(week, "img", "s-still");
+  lanesOf(week).keys[0].dispatch("input", { target: { value: String(timeOf(week, 0) - 600) } });
+  await wait(200);
+  assert.equal(stills().length, 0);
+  const { pics, videos } = lanesOf(week);
+  pdown(pics[0], 300, 0);
+  pmove(pics[0], 250, 10);
+  await wait(200);
+  assert.equal(stills().length, 1);
+  assert.ok(stills()[0].src.startsWith("/frame/cam-side/"));
+  videos[0].dispatch("seeked");
+  assert.equal(stills().length, 0);
+  pup(pics[0], 250, 1000);
+  week._current.get("gV").pause();
+});
+
+test("Live opens the stream, closes it when scrubbed back, and comes back after a pause", async () => {
+  const source = countLive(withScrub(withClips(withDetail(fakeSource(), recentDetail()))));
+  const week = await openVisit(source);
+  await settle();
+  const block = week._current.get("gV");
+  const img = liveShown(block)[0];
+  assert.match(img.src, /^blob:/);
+  const stream = liveStreams.at(-1);
+  assert.ok(lanesOf(week).pics[0].childNodes.every((n) => n.getAttribute("class") !== "s-video"));
+  lanesOf(week).keys[0].dispatch("input", { target: { value: String(Math.floor(Date.now() / 1000) - 3600) } });
+  assert.equal(liveShown(block).length, 0);
+  assert.equal(img.src, ""); // the picture is gone
+  assert.equal(stream.aborted, true); // and the stream closed
+  assert.equal(lanesOf(week).pics[0].childNodes[0].getAttribute("class"), "s-video");
+  lanesOf(week).keys[0].dispatch("input", { target: { value: String(Math.floor(Date.now() / 1000) + 60) } });
+  await settle();
+  assert.equal(liveShown(block).length, 1);
+  block.pause();
+  assert.equal(liveShown(block).length, 0);
+  assert.equal(lanesOf(week).pics[0].childNodes[0].getAttribute("class"), "s-video");
+  await withClock(async (skew) => {
+    skew(10 * 60 * 1000);
+    block.resume();
+    await settle();
+    assert.equal(liveShown(block).length, 1, "still Live: it follows now");
+    assert.equal(lanesOf(week).clocks[0].textContent, "Live");
+  });
+  block.pause();
+});
+
+test("late answers after the row closed open nothing", async () => {
+  const source = countLive(withScrub(withClips(withDetail(fakeSource(), recentDetail()))));
+  let release;
+  const gate = new Promise((resolve) => (release = resolve));
+  source.detections = async () => {
+    await gate;
+    return [{ start: Date.now() / 1000 - 30, end: null, types: ["person"], sound: false }];
+  };
+  const late = source.liveStreamUrl;
+  let liveRelease;
+  const liveGate = new Promise((resolve) => (liveRelease = resolve));
+  source.liveStreamUrl = async (camera) => {
+    await liveGate;
+    return late(camera);
+  };
+  const week = await openVisit(source);
+  const block = week._current.get("gV");
+  for (const video of lanesOf(week).videos) video.dispatch("loadeddata");
+  block.pause();
+  release();
+  liveRelease();
+  await settle();
+  await settle();
+  assert.equal(liveShown(block).length, 0);
+});
+
+test("a camera that plays into Live keeps following now", async () => {
+  await withClock(async (skew) => {
+    const detail = visitDetail();
+    detail.visit.stops[0].time = new Date(Date.now() - 150 * 1000).toISOString();
+    const source = withScrub(withClips(withDetail(fakeSource(), detail)));
+    const week = await openVisit(source);
+    const { btns, videos, clocks } = lanesOf(week);
+    btns[0].dispatch("click");
+    videos[0].dispatch("ended");
+    videos[0].dispatch("ended");
+    await settle();
+    assert.equal(clocks[0].textContent, "Live");
+    skew(120000);
+    await wait(150);
+    assert.equal(clocks[0].textContent, "Live");
+    week._current.get("gV").pause();
+  });
+});
+
+test("a minute that can't be had is said so and not asked for again for 30 s", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  const { btns, videos } = lanesOf(week);
+  btns[0].dispatch("click");
+  await settle();
+  videos[0].dispatch("error");
+  await wait(50);
+  assert.ok(texts(week).includes("Couldn't load this minute."));
+  const asked = source.footageAsked.length;
+  await wait(500);
+  assert.equal(source.footageAsked.length, asked);
+  week._current.get("gV").pause();
+});
+
+test("a minute the engine says isn't recorded yet (425) goes to Live", async () => {
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (url, options) => (String(url).startsWith("/footage/") ? Promise.resolve({ status: 425 }) : realFetch(url, options));
+  try {
+    const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+    const week = await openVisit(source);
+    const { videos, clocks } = lanesOf(week);
+    videos[0].src = "/footage/x";
+    videos[0].dispatch("error");
+    await settle();
+    await settle();
+    assert.equal(clocks[0].textContent, "Live");
+    week._current.get("gV").pause();
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("detections that fail are not asked again for 30 s, then are", async () => {
+  await withClock(async (skew) => {
+    const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+    let asked = 0;
+    source.detections = async () => {
+      asked++;
+      throw new Error("down");
+    };
+    const week = await openVisit(source);
+    const { btns, videos } = lanesOf(week);
+    for (const video of videos) video.dispatch("loadeddata");
+    await settle();
+    btns[0].dispatch("click");
+    const first = asked;
+    assert.ok(first > 0);
+    await wait(300);
+    assert.equal(asked, first);
+    skew(31000);
+    await wait(120);
+    assert.ok(asked > first);
+    week._current.get("gV").pause();
+  });
+});
+
+test("detections: each kept once, malformed ones left out, none asked for a block in the future", async () => {
+  const detail = recentDetail(300);
+  const source = withScrub(withClips(withDetail(fakeSource(), detail)));
+  const t = Date.parse(detail.visit.stops[0].time) / 1000;
+  source.detections = async (camera, start) => {
+    source.detectionsAsked.push([camera, start]);
+    return [
+      { start: t - 5, end: t, types: ["person"], sound: false },
+      { start: "soon", end: null, types: ["person"] },
+      { start: t - 3, end: null, types: "vehicle", sound: false },
+      null,
+    ];
+  };
+  const week = await openVisit(source);
+  for (const video of lanesOf(week).videos) video.dispatch("loadeddata");
+  await settle();
+  await settle();
+  const nowS = Date.now() / 1000;
+  assert.ok(source.detectionsAsked.filter(([camera]) => camera === "cam-side").every(([, start]) => start <= nowS));
+  const side = lanesOf(week).tapes[0];
+  const dets = side.querySelectorAll("span").filter((n) => (n.getAttribute("class") || "").startsWith("s-det"));
+  assert.equal(dets.length, 2); // the person once (every block answered it), and the vehicle-less one
+  assert.deepEqual(dets.map((n) => n.getAttribute("class")).sort(), ["s-det s-other", "s-det s-person"]);
+  week._current.get("gV").pause();
+});
+
+test("the tape slides as time moves, and is built again only when it must be", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  const strip = allByClass(week, "div", "s-strip")[0];
+  const marks = strip.childNodes.slice();
+  const t0 = timeOf(week, 0);
+  lanesOf(week).keys[0].dispatch("input", { target: { value: String(t0 + 20) } });
+  assert.deepEqual(strip.childNodes, marks);
+  assert.match(strip.style.cssText, /translateX\(-?[0-9.]+%\)/);
+  lanesOf(week).keys[0].dispatch("input", { target: { value: String(t0 + 600) } });
+  assert.notDeepEqual(strip.childNodes, marks);
+  week._current.get("gV").pause();
+});
+
+test("at full width and playing steadily for 5 s, a camera steps up to full quality; a drag drops it back", async () => {
+  await withClock(async (skew) => {
+    const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+    const week = await openVisit(source);
+    const { pics, btns, videos } = lanesOf(week);
+    pdown(pics[0], 100, 0);
+    pup(pics[0], 100, 10); // full width
+    btns[0].dispatch("click");
+    await settle();
+    videos[0].dispatch("playing");
+    skew(6000);
+    await wait(120);
+    assert.equal(source.footageAsked.at(-1)[2], "full");
+    pdown(pics[0], 300, 1000);
+    pmove(pics[0], 200, 1010);
+    pup(pics[0], 200, 2000);
+    assert.equal(source.footageAsked.at(-1)[2], "low");
+    week._current.get("gV").pause();
+  });
+});
+
+test("the next minute is asked for ahead, its first bytes only", async () => {
+  const realFetch = globalThis.fetch;
+  const asked = [];
+  globalThis.fetch = async (url, options) => (asked.push([url, options?.headers?.Range]), { status: 206, body: { cancel() {} } });
+  try {
+    const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+    const week = await openVisit(source);
+    const { btns, videos } = lanesOf(week);
+    btns[0].dispatch("click");
+    await settle();
+    videos[0].readyState = 1;
+    videos[0].currentTime = 45;
+    await wait(120);
+    await settle();
+    assert.equal(asked.length, 1);
+    assert.match(asked[0][0], /-low\.mp4$/);
+    assert.equal(asked[0][1], "bytes=0-65535");
+    week._current.get("gV").pause();
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("at most three Live streams are open; the others offer one, and taking it keeps three", async () => {
+  const detail = visitDetail();
+  const recent = new Date(Date.now() - 10000).toISOString();
+  detail.visit.stops = ["a", "b", "c", "d", "e"].map((x, i) => ({ place: `P${x}`, time: recent, what: "a person", names: [], picture: null, camera: `cam-${x}`, alerted: i === 0 }));
+  detail.visit.alerted = { stop: 0, alert: 0.8 };
+  const source = countLive(withScrub(withClips(withDetail(fakeSource(), detail))));
+  const week = await openVisit(source);
+  await settle();
+  const block = week._current.get("gV");
+  assert.equal(liveShown(block).length, 3);
+  const hints = allByClass(week, "button", "s-hint");
+  assert.equal(hints.length, 2);
+  assert.equal(hints[0].textContent, "Live — tap to watch");
+  hints[0].dispatch("click");
+  await settle();
+  assert.equal(liveShown(block).length, 3);
+  assert.equal(allByClass(week, "button", "s-hint").length, 2);
+  block.pause();
+});
+
+test("a Live stream that stops says when it was last live, and offers to try again", async () => {
+  const source = countLive(withScrub(withClips(withDetail(fakeSource(), recentDetail()))));
+  const week = await openVisit(source);
+  await settle();
+  const block = week._current.get("gV");
+  liveStreams.at(-1).end();
+  await settle();
+  await settle();
+  assert.notEqual(lanesOf(week).clocks[0].textContent, "Live");
+  assert.ok(texts(week).includes("Live stopped"));
+  const retry = allByClass(week, "button", "s-hint")[0];
+  assert.match(retry.textContent, /^Live stopped at .+\. Try again$/);
+  retry.dispatch("click");
+  await settle();
+  assert.equal(liveShown(block).length, 1);
+  block.pause();
+});
+
+test("a source missing any of the five keeps today's thumbnails", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  delete source.liveStreamUrl;
+  const week = await openVisit(source);
+  assert.equal(allByClass(week, "div", "s-player").length, 0);
+  assert.equal(allByClass(week, "button", "v-thumb").length, 2);
+  assert.equal(week.shadowRoot.querySelectorAll("a").filter((a) => a.textContent === "Watch live").length, 1);
+});
+
+test("a stop starts at its camera's own moment, and Line up uses the alerted stop's", async () => {
+  const detail = visitDetail();
+  const side = Date.parse(detail.visit.stops[0].time) / 1000;
+  detail.visit.stops[0].camera_time = new Date((side - 300) * 1000).toISOString();
+  const garage = Date.parse(detail.visit.stops[1].time) / 1000;
+  detail.visit.stops[1].camera_time = new Date((garage - 120) * 1000).toISOString();
+  const source = withScrub(withClips(withDetail(fakeSource(), detail)));
+  const week = await openVisit(source);
+  assert.deepEqual(source.footageAsked[0], ["cam-side", minuteOf(side - 300), "low"]);
+  button(week, "Line up at the alert").dispatch("click");
+  assert.equal(timeOf(week, 0), Math.round((garage - 120) / 5) * 5);
+  week._current.get("gV").pause();
+});
+
+test("a visit with no alert has no alert line and no Line up", async () => {
+  const detail = visitDetail();
+  detail.visit.alerted = null;
+  for (const stop of detail.visit.stops) stop.alerted = false;
+  const source = withScrub(withClips(withDetail(fakeSource(), detail)));
+  const week = await openVisit(source);
+  assert.equal(button(week, "Line up at the alert"), undefined);
+  assert.equal(allByClass(week, "span", "s-alert").length, 0);
+  assert.equal(allByClass(week, "div", "s-player").length, 2);
+  week._current.get("gV").pause();
+});
+
+test("a visit with no camera gets the bar with the first camera added", async () => {
+  const detail = visitDetail();
+  for (const stop of detail.visit.stops) stop.camera = null;
+  const source = withScrub(withClips(withDetail(fakeSource(), detail)));
+  const week = await openVisit(source);
+  assert.equal(allByClass(week, "div", "s-bar").length, 0);
+  button(week, "Add a camera").dispatch("click");
+  await settle();
+  button(week, "Patio").dispatch("click");
+  await settle();
+  assert.equal(allByClass(week, "div", "s-bar").length, 1);
+  assert.equal(allByClass(week, "div", "s-player").length, 1);
+  assert.ok(Number.isFinite(timeOf(week, 0)));
+  week._current.get("gV").pause();
+});
+
+test("Add a camera says when the cameras can't be had, when every one is shown, and closes again", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  source.cameras = async () => {
+    throw new Error("nope");
+  };
+  let week = await openVisit(source);
+  const add = button(week, "Add a camera");
+  add.dispatch("click");
+  await settle();
+  assert.ok(texts(week).includes("Couldn't load the cameras."));
+  add.dispatch("click");
+  assert.equal(add.getAttribute("aria-expanded"), "false");
+  assert.ok(!texts(week).includes("Couldn't load the cameras."));
+  week._current.get("gV").pause();
+
+  const full = withScrub(withClips(withDetail(fakeSource(), visitDetail())), [{ id: "cam-side", name: "Sidewalk Camera", place: "Sidewalk" }]);
+  week = await openVisit(full);
+  button(week, "Add a camera").dispatch("click");
+  await settle();
+  assert.ok(texts(week).includes("Every camera is shown."));
+  week._current.get("gV").pause();
+});
+
+test("a newer version waits while the cameras are in use, then comes in where they were", async () => {
+  await withClock(async (skew) => {
+    const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+    const week = await openVisit(source);
+    button(week, "Line up at the alert").dispatch("click");
+    await settle();
+    const lined = timeOf(week, 0);
+    const newer = visitDetail();
+    newer.visit.headline = "NEWER VERSION HEADLINE";
+    source.detail = async () => newer;
+    const story = guardStory("gV", { title: TRIAL_TITLE, updated: NEWER });
+    source.push([story]);
+    await settle();
+    await settle();
+    assert.ok(!texts(week).includes("NEWER VERSION HEADLINE"));
+    skew(4000);
+    source.push([story]);
+    await settle();
+    assert.ok(texts(week).includes("NEWER VERSION HEADLINE"));
+    assert.equal(withClass(week, "button", "s-sync").getAttribute("aria-pressed"), "true");
+    assert.equal(timeOf(week, 0), lined);
+    assert.equal(timeOf(week, 1), lined);
+    week._current.get("gV").pause();
+  });
+});
+
+test("today's clip has a small play button and a sound button, no browser controls", async () => {
+  const source = withClips(withDetail(fakeSource(), visitDetail()));
+  const week = await openVisit(source);
+  byClass(week, "button", "v-play").dispatch("click");
+  await settle();
+  const video = week.shadowRoot.querySelector("video");
+  assert.equal(video.getAttribute("controls"), null);
+  const play = allByClass(week, "button", "v-ctl-play")[0];
+  const sound = allByClass(week, "button", "v-ctl-sound")[0];
+  assert.ok(play && sound);
+  let paused = 0;
+  video.pause = () => paused++;
+  video.paused = false;
+  play.dispatch("click");
+  assert.equal(paused, 1);
+  video.dispatch("pause");
+  assert.equal(play.getAttribute("aria-label"), "Play the recording");
+  assert.equal(video.muted, true);
+  sound.dispatch("click");
+  assert.equal(video.muted, false);
+  assert.equal(sound.getAttribute("aria-pressed"), "true");
+});
+
+test("a drag pauses the camera being dragged", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  const { pics, btns, videos } = lanesOf(week);
+  let paused = 0;
+  videos[0].pause = () => paused++;
+  btns[0].dispatch("click");
+  paused = 0;
+  pdown(pics[0], 300, 0);
+  pmove(pics[0], 250, 1000);
+  pup(pics[0], 250, 2000);
+  assert.ok(paused > 0);
+  assert.equal(btns[0].getAttribute("aria-label"), "Play Sidewalk");
+  week._current.get("gV").pause();
+});
+
+test("the tape marks the stop's moment, and says so in words there", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  assert.equal(allByClass(week, "span", "s-stop").length, 2);
+  assert.equal(allByClass(week, "span", "s-rel")[0].textContent, "when they got here");
+  week._current.get("gV").pause();
+});
+
+test("a minute that arrives after the camera moved on is not put in", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const gates = [];
+  source.footageUrl = (camera, minute, quality) =>
+    new Promise((resolve) => gates.push(() => resolve(`/footage/${camera}/${minute}-${quality}.mp4`)));
+  const week = await openVisit(source);
+  const first = gates.length; // the first minute of each camera, waiting
+  lanesOf(week).keys[0].dispatch("input", { target: { value: String(timeOf(week, 0) - 600) } });
+  for (const go of gates.slice(first)) go(); // the new minute answers first
+  await settle();
+  gates[0](); // the old one last of all
+  await settle();
+  const minute = minuteOf(timeOf(week, 0));
+  assert.match(lanesOf(week).videos[0].src, new RegExp(`/${minute}-low\\.mp4$`));
+  week._current.get("gV").pause();
+});
+
+test("a face alone is marked as a person", () => {
+  assert.equal(ticksIn([{ start: 10, end: 11, types: ["face"], sound: false }], 0, 120)[0].kind, "person");
+});
+
+test("only the full-width camera steps up, and only after 5 s of steady playback", async () => {
+  await withClock(async (skew) => {
+    const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+    const week = await openVisit(source);
+    const { pics, btns, videos } = lanesOf(week);
+    btns[1].dispatch("click"); // the garage plays at its own width
+    videos[1].dispatch("playing");
+    skew(6000);
+    await wait(120);
+    assert.ok(source.footageAsked.filter(([camera]) => camera === "cam-garage").every(([, , q]) => q === "low"));
+    btns[1].dispatch("click");
+    pdown(pics[0], 100, 0);
+    pup(pics[0], 100, 10);
+    btns[0].dispatch("click");
+    await settle();
+    videos[0].dispatch("playing");
+    skew(2000);
+    await wait(120);
+    assert.ok(source.footageAsked.filter(([camera]) => camera === "cam-side").every(([, , q]) => q === "low"));
+    skew(4000);
+    await wait(120);
+    assert.equal(source.footageAsked.at(-1)[2], "full");
+    videos[0].dispatch("waiting"); // stalls at full: back to low
+    assert.equal(source.footageAsked.at(-1)[2], "low");
+    week._current.get("gV").pause();
+  });
+});
+
+test("detections wait for the first picture, but no longer than a moment", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  assert.deepEqual(source.detectionsAsked, []);
+  await wait(1700);
+  assert.ok(source.detectionsAsked.length > 0);
+  week._current.get("gV").pause();
+});
+
+test("detections are never asked for a block that starts after now", async () => {
+  const source = countLive(withScrub(withClips(withDetail(fakeSource(), recentDetail()))));
+  const week = await openVisit(source);
+  await settle();
+  liveShown(week._current.get("gV"))[0].dispatch("load");
+  for (const video of lanesOf(week).videos) video.dispatch("loadeddata");
+  await settle();
+  const nowS = Date.now() / 1000;
+  assert.ok(source.detectionsAsked.length > 0);
+  assert.ok(source.detectionsAsked.every(([, start]) => start <= nowS));
+  week._current.get("gV").pause();
+});
+
+test("in sync, the shared clock says Live when the cameras are", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  withClass(week, "button", "s-sync").dispatch("click");
+  lanesOf(week).keys[0].dispatch("input", { target: { value: String(Math.floor(Date.now() / 1000) + 60) } });
+  await settle();
+  assert.equal(allByClass(week, "span", "s-big")[0].textContent, "Live");
+  week._current.get("gV").pause();
+});
+
+test("a cancel during a glide stops it", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  const { pics } = lanesOf(week);
+  pdown(pics[0], 300, 0);
+  pmove(pics[0], 290, 10);
+  pmove(pics[0], 280, 20);
+  pup(pics[0], 280, 30);
+  await wait(60);
+  pics[0].dispatch("pointercancel", {});
+  const stopped = lanesOf(week).clocks[0].textContent;
+  await wait(150);
+  assert.equal(lanesOf(week).clocks[0].textContent, stopped);
+  week._current.get("gV").pause();
+});
+
+test("the next minute is not asked for ahead early in this one", async () => {
+  const realFetch = globalThis.fetch;
+  let asked = 0;
+  globalThis.fetch = async () => (asked++, { status: 206, body: { cancel() {} } });
+  try {
+    const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+    const week = await openVisit(source);
+    const { btns, videos } = lanesOf(week);
+    btns[0].dispatch("click");
+    await settle();
+    videos[0].readyState = 1;
+    videos[0].currentTime = 10;
+    await wait(120);
+    assert.equal(asked, 0);
+    week._current.get("gV").pause();
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("a version replaced by a newer one closes its Live streams", async () => {
+  const source = countLive(withScrub(withClips(withDetail(fakeSource(), recentDetail()))));
+  const week = await openVisit(source);
+  await settle();
+  const old = week._current.get("gV");
+  assert.equal(liveShown(old).length, 1);
+  await withClock(async (skew) => {
+    skew(4000); // left alone a while
+    source.push([guardStory("gV", { title: TRIAL_TITLE, updated: NEWER })]);
+    await settle();
+    await settle();
+  });
+  assert.notEqual(week._current.get("gV"), old);
+  assert.equal(liveShown(old).length, 0);
+  week._current.get("gV").pause();
+});
+
+// --- round two: Live slots, the idle swap, a card off the page, the Live stream itself -------
+
+function fiveLive() {
+  const detail = visitDetail();
+  const recent = new Date(Date.now() - 10000).toISOString();
+  detail.visit.stops = ["a", "b", "c", "d", "e"].map((x, i) => ({ place: `P${x}`, time: recent, what: "a person", names: [], picture: null, camera: `cam-${x}`, alerted: i === 0 }));
+  detail.visit.alerted = { stop: 0, alert: 0.8 };
+  return detail;
+}
+
+test("taking a Live stream from another camera never opens a fourth", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), fiveLive())));
+  const week = await openVisit(source);
+  await settle();
+  await settle();
+  const block = week._current.get("gV");
+  assert.equal(livesOpen().length, 3);
+  allByClass(week, "button", "s-hint")[1].dispatch("click");
+  await settle();
+  await settle();
+  assert.equal(livesOpen().length, 3);
+  assert.equal(liveShown(block).length, 3);
+  block.pause();
+  assert.equal(livesOpen().length, 0);
+});
+
+test("a freed Live slot goes to a camera waiting for one, on screen first", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), fiveLive())));
+  const week = await openVisit(source);
+  await settle();
+  await settle();
+  const block = week._current.get("gV");
+  const { pics, keys } = lanesOf(week);
+  intersect(pics[3], false); // d is off screen; e is on screen
+  keys[0].dispatch("input", { target: { value: String(Math.floor(Date.now() / 1000) - 3600) } }); // a leaves Live
+  await settle();
+  await settle();
+  assert.equal(livesOpen().length, 3);
+  assert.ok(liveStreams.at(-1).url === "/live/cam-e" && !liveStreams.at(-1).aborted);
+  block.pause();
+});
+
+test("a camera coming on screen takes the stream of one that went off it", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), fiveLive())));
+  const week = await openVisit(source);
+  await settle();
+  await settle();
+  const block = week._current.get("gV");
+  const { pics } = lanesOf(week);
+  intersect(pics[3], false);
+  intersect(pics[4], false);
+  intersect(pics[0], false); // a scrolls away
+  intersect(pics[3], true); // and d comes into view
+  await settle();
+  await settle();
+  const open = livesOpen().map((x) => x.url).sort();
+  assert.deepEqual(open, ["/live/cam-b", "/live/cam-c", "/live/cam-d"]);
+  block.pause();
+});
+
+test("a newer version comes in 3 s after the last touch, with no further push", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  button(week, "Line up at the alert").dispatch("click");
+  const newer = visitDetail();
+  newer.visit.headline = "NEWER VERSION HEADLINE";
+  source.detail = async () => newer;
+  source.push([guardStory("gV", { title: TRIAL_TITLE, updated: NEWER })]);
+  await settle();
+  await settle();
+  await wait(1500);
+  lanesOf(week).keys[0].dispatch("input", { target: { value: String(timeOf(week, 0) + 5) } }); // a touch
+  await wait(2000);
+  assert.ok(!texts(week).includes("NEWER VERSION HEADLINE"));
+  await wait(1300);
+  assert.ok(texts(week).includes("NEWER VERSION HEADLINE"));
+  week._current.get("gV").pause();
+});
+
+test("a playing camera or a finger on the tape holds a newer version back", async () => {
+  await withClock(async (skew) => {
+    const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+    const week = await openVisit(source);
+    lanesOf(week).btns[0].dispatch("click"); // playing
+    const newer = visitDetail();
+    newer.visit.headline = "NEWER VERSION HEADLINE";
+    source.detail = async () => newer;
+    const story = guardStory("gV", { title: TRIAL_TITLE, updated: NEWER });
+    source.push([story]);
+    await settle();
+    await settle();
+    skew(10000);
+    source.push([story]);
+    await settle();
+    assert.ok(!texts(week).includes("NEWER VERSION HEADLINE"));
+    lanesOf(week).btns[0].dispatch("click"); // paused
+    pdown(lanesOf(week).tapes[0], 100, 0); // a finger down
+    skew(10000);
+    source.push([story]);
+    await settle();
+    assert.ok(!texts(week).includes("NEWER VERSION HEADLINE"));
+    pup(lanesOf(week).tapes[0], 100, 10);
+    skew(10000);
+    source.push([story]);
+    await settle();
+    assert.ok(texts(week).includes("NEWER VERSION HEADLINE"));
+    week._current.get("gV").pause();
+  });
+});
+
+test("an answer that comes after the card left the page starts nothing", async () => {
+  const source = countLive(withScrub(withClips(withDetail(fakeSource(), recentDetail()))));
+  let release;
+  source.detail = () => new Promise((resolve) => (release = () => resolve(recentDetail())));
+  const T = timers();
+  try {
+    const week = mount("hs-week", source);
+    source.push([guardStory("gV", { title: TRIAL_TITLE })]);
+    await settle();
+    openFirst(week);
+    await settle();
+    week._connected = false;
+    week.disconnectedCallback();
+    release();
+    await settle();
+    await settle();
+    assert.equal(source.liveOpened, 0);
+    assert.equal(T.open(), 0);
+    week._connected = true;
+    week.connectedCallback();
+    await settle();
+    await settle();
+    assert.equal(source.liveOpened, 1);
+    week._current.get("gV")?.pause();
+  } finally {
+    T.restore();
+  }
+});
+
+test("Live shows each picture the stream sends, and says when it stops sending them", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), recentDetail())));
+  const week = await openVisit(source);
+  await settle();
+  await settle();
+  const block = week._current.get("gV");
+  const img = liveShown(block)[0];
+  const first = img.src;
+  const stream = liveStreams.at(-1);
+  stream.push(livePart(new Uint8Array([0xff, 0xd8, 1, 2, 0xff, 0xd9])));
+  await settle();
+  assert.notEqual(img.src, first); // a new picture, a new address
+  assert.equal(lanesOf(week).clocks[0].textContent, "Live");
+  stream.end(); // the stream ends after pictures came
+  await settle();
+  await settle();
+  assert.match(allByClass(week, "button", "s-hint")[0].textContent, /^Live stopped at .+\. Try again$/);
+  block.pause();
+});
+
+test("a Live stream that goes quiet for 5 s is noticed", async () => {
+  await withClock(async (skew) => {
+    const source = withScrub(withClips(withDetail(fakeSource(), recentDetail())));
+    const week = await openVisit(source);
+    await settle();
+    await settle();
+    assert.equal(lanesOf(week).clocks[0].textContent, "Live");
+    for (let i = 0; i < 27; i++) await wait(200); // (short waits: a long one wouldn't hold Node)
+    assert.ok(texts(week).includes("Live stopped"));
+    week._current.get("gV").pause();
+  });
+});
+
+test("the multipart reader takes whole parts by their length and keeps the rest", () => {
+  const a = livePart(new Uint8Array([1, 2, 3]));
+  const b = livePart(new Uint8Array([4, 5]));
+  const joined = new Uint8Array(a.length + b.length);
+  joined.set(a);
+  joined.set(b, a.length);
+  const cut = joined.length - 3;
+  const first = multipartParts(joined.slice(0, cut));
+  assert.deepEqual(first.parts.map((p) => [...p]), [[1, 2, 3]]);
+  const rest = new Uint8Array(first.rest.length + 3);
+  rest.set(first.rest);
+  rest.set(joined.slice(cut), first.rest.length);
+  assert.deepEqual(multipartParts(rest).parts.map((p) => [...p]), [[4, 5]]);
+});
+
+test("after a stall, full quality waits 30 s of steady playback, doubling each stall up to 2 min", async () => {
+  await withClock(async (skew) => {
+    const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+    const week = await openVisit(source);
+    const { pics, btns, videos } = lanesOf(week);
+    pdown(pics[0], 100, 0);
+    pup(pics[0], 100, 10);
+    btns[0].dispatch("click");
+    await settle();
+    const stepUp = async (seconds) => {
+      videos[0].dispatch("playing");
+      skew(seconds * 1000);
+      await wait(120);
+      return source.footageAsked.at(-1)[2];
+    };
+    assert.equal(await stepUp(6), "full");
+    videos[0].dispatch("waiting"); // a stall: low again
+    assert.equal(await stepUp(20), "low");
+    assert.equal(await stepUp(31), "full");
+    videos[0].dispatch("waiting");
+    assert.equal(await stepUp(50), "low");
+    assert.equal(await stepUp(61), "full");
+    for (let i = 0; i < 4; i++) {
+      videos[0].dispatch("waiting");
+      await stepUp(200);
+    }
+    videos[0].dispatch("waiting");
+    assert.equal(await stepUp(121), "full"); // never more than 2 min
+    week._current.get("gV").pause();
+  });
+});
+
+test("Play on a Live camera counts as playing, alone or with Play all", async () => {
+  await withClock(async (skew) => {
+    const source = withScrub(withClips(withDetail(fakeSource(), recentDetail())));
+    const week = await openVisit(source);
+    await settle();
+    const { btns } = lanesOf(week);
+    btns[0].dispatch("click");
+    assert.equal(btns[0].getAttribute("aria-label"), "Pause Sidewalk");
+    const newer = recentDetail();
+    newer.visit.headline = "NEWER VERSION HEADLINE";
+    source.detail = async () => newer;
+    const story = guardStory("gV", { title: TRIAL_TITLE, updated: NEWER });
+    skew(10000);
+    source.push([story]);
+    await settle();
+    await settle();
+    assert.ok(!texts(week).includes("NEWER VERSION HEADLINE"), "a playing Live camera holds it back");
+    btns[0].dispatch("click");
+    withClass(week, "button", "s-sync").dispatch("click");
+    withClass(week, "button", "s-all").dispatch("click");
+    assert.ok(lanesOf(week).btns.every((b) => b.getAttribute("aria-label").startsWith("Pause")));
+    week._current.get("gV").pause();
+  });
+});
+
+test("opening Add a camera and focusing a camera's time count as use, and a swap keeps both", async () => {
+  await withClock(async (skew) => {
+    const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+    const week = await openVisit(source);
+    const newer = visitDetail();
+    newer.visit.headline = "NEWER VERSION HEADLINE";
+    source.detail = async () => newer;
+    const story = guardStory("gV", { title: TRIAL_TITLE, updated: NEWER });
+    skew(10000);
+    button(week, "Add a camera").dispatch("click");
+    await settle();
+    source.push([story]);
+    await settle();
+    await settle();
+    assert.ok(!texts(week).includes("NEWER VERSION HEADLINE"), "opening the picker is use");
+    skew(10000);
+    lanesOf(week).keys[1].focus();
+    source.push([story]);
+    await settle();
+    assert.ok(!texts(week).includes("NEWER VERSION HEADLINE"), "focus is use");
+    skew(10000);
+    source.push([story]);
+    await settle();
+    await wait(20);
+    assert.ok(texts(week).includes("NEWER VERSION HEADLINE"));
+    assert.equal(button(week, "Add a camera").getAttribute("aria-expanded"), "true");
+    assert.ok(button(week, "Patio"));
+    assert.equal(document.activeElement, lanesOf(week).keys[1]);
+    week._current.get("gV").pause();
+  });
+});
+
+test("a minute that ends goes on from the minute loaded, not from the clock", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  const { btns, videos } = lanesOf(week);
+  const side = Date.parse(visitDetail().visit.stops[0].time) / 1000;
+  btns[0].dispatch("click");
+  await settle();
+  videos[0].readyState = 1;
+  videos[0].currentTime = 60.04; // the clock has run just past the minute's end
+  await wait(80);
+  videos[0].dispatch("ended");
+  await settle();
+  assert.ok(source.footageAsked.some(([camera, minute]) => camera === "cam-side" && minute === minuteOf(side) + 60));
+  assert.ok(!source.footageAsked.some(([camera, minute]) => camera === "cam-side" && minute === minuteOf(side) + 120));
+  week._current.get("gV").pause();
+});
+
+test("a minute that loads after all is no longer kept as failed", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  const { videos, keys } = lanesOf(week);
+  const t = timeOf(week, 0);
+  videos[0].dispatch("error");
+  await settle();
+  await settle();
+  assert.ok(texts(week).includes("Couldn't load this minute."));
+  videos[0].dispatch("loadeddata"); // it came after all
+  keys[0].dispatch("input", { target: { value: String(t - 600) } });
+  await settle();
+  const asked = source.footageAsked.length;
+  keys[0].dispatch("input", { target: { value: String(t) } }); // back, well within 30 s
+  await settle();
+  assert.ok(source.footageAsked.length > asked);
+  assert.ok(!texts(week).includes("Couldn't load this minute."));
+  week._current.get("gV").pause();
+});
+
+test("a detection still going when first seen is put right once its end is known", async () => {
+  await withClock(async (skew) => {
+    const source = withScrub(withClips(withDetail(fakeSource(), recentDetail())));
+    const start = Date.now() / 1000 - 200;
+    let end = null;
+    source.detections = async (camera) => (camera === "cam-side" ? [{ start, end, types: ["person"], sound: false }] : []);
+    const week = await openVisit(source);
+    await settle();
+    await settle();
+    const people = () => lanesOf(week).tapes[0].querySelectorAll("span").filter((n) => n.getAttribute("class") === "s-det s-person");
+    assert.equal(people().length, 1); // still going, as far as anyone knew
+    end = start + 10; // it ended long ago
+    skew(31000);
+    await wait(1100);
+    await settle();
+    assert.equal(people().length, 0); // the strip around now no longer shows it
+    week._current.get("gV").pause();
+  });
+});
+
+test("asleep, a camera lets go of its video", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  await settle();
+  const { videos } = lanesOf(week);
+  assert.match(videos[0].src, /^\/footage\//);
+  let loads = 0;
+  videos[0].load = () => loads++;
+  const block = week._current.get("gV");
+  block.pause();
+  assert.equal(videos[0].src, "");
+  assert.equal(loads, 1);
+  block.resume();
+  await settle();
+  assert.match(videos[0].src, /^\/footage\//); // asked for again
+  block.dispose();
+  assert.equal(videos[0].src, "");
+});
+
+test("late answers after a pause are dropped: footage, Live, a failed video", async () => {
+  const source = countLive(withScrub(withClips(withDetail(fakeSource(), recentDetail(300)))));
+  const gates = [];
+  source.footageUrl = (camera, minute, quality) => new Promise((resolve) => gates.push(() => resolve(`/footage/${camera}/${minute}-${quality}.mp4`)));
+  const week = await openVisit(source);
+  const block = week._current.get("gV");
+  const { videos } = lanesOf(week);
+  block.pause();
+  videos[1].dispatch("error"); // after the pause: ignored
+  for (const go of gates) go();
+  await settle();
+  await settle();
+  assert.ok(videos.every((v) => !v.src), JSON.stringify(videos.map((v) => v.src)));
+  assert.ok(!texts(week).includes("Couldn't load this minute."));
+});
+
+test("closing Live ends the stream it opened and no later one answers for it", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), recentDetail())));
+  let release;
+  source.liveStreamUrl = (camera) => new Promise((resolve) => (release = () => resolve(`/live/${camera}`)));
+  const week = await openVisit(source);
+  await settle();
+  const block = week._current.get("gV");
+  lanesOf(week).keys[0].dispatch("input", { target: { value: String(Math.floor(Date.now() / 1000) - 3600) } }); // away from Live
+  release();
+  await settle();
+  await settle();
+  assert.equal(liveShown(block).length, 0);
+  assert.equal(livesOpen().filter((x) => x.url === "/live/cam-side").length, 0);
+  block.pause();
+});
+
+test("the block of detections holding now is asked again every 30 s near Live, and a failed one waits 30 s", async () => {
+  await withClock(async (skew) => {
+    skew((Math.ceil(Date.now() / 600000) * 600 + 100) * 1000 - Date.now()); // 100 s into a block
+    const source = withScrub(withClips(withDetail(fakeSource(), recentDetail())));
+    let fail = false;
+    const asked = [];
+    source.detections = async (camera, start) => {
+      if (camera === "cam-side") asked.push(start); // the Live one
+      if (fail) throw new Error("down");
+      return [];
+    };
+    const week = await openVisit(source);
+    await settle();
+    await settle();
+    const nowBlock = Math.floor(Date.now() / 1000 / 600) * 600;
+    const count = () => asked.filter((x) => x === nowBlock).length;
+    assert.equal(count(), 1);
+    skew(31000);
+    await wait(1100); // Live redraws each second
+    assert.equal(count(), 2);
+    fail = true;
+    skew(31000);
+    await wait(1100);
+    assert.equal(count(), 3);
+    skew(10000);
+    await wait(1100);
+    assert.equal(count(), 3); // a failure waits
+    skew(25000);
+    await wait(1100);
+    assert.equal(count(), 4);
+    week._current.get("gV").pause();
+  });
+});
+
+test("a glide moves the camera flicked, not the last one touched", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  const { pics, btns } = lanesOf(week);
+  btns[1].dispatch("click"); // the garage touched last
+  btns[1].dispatch("click");
+  const garage = timeOf(week, 1);
+  pdown(pics[0], 300, 0);
+  pmove(pics[0], 290, 10);
+  pmove(pics[0], 280, 20);
+  pup(pics[0], 280, 30);
+  await wait(300);
+  assert.equal(timeOf(week, 1), garage);
+  week._current.get("gV").pause();
+});
+
+test("Live and still pictures can't be dragged off as images, and the Live mark sits on top", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), recentDetail())));
+  const week = await openVisit(source);
+  await settle();
+  await settle();
+  const img = liveShown(week._current.get("gV"))[0];
+  assert.equal(img.getAttribute("draggable"), "false");
+  const { pics } = lanesOf(week);
+  pdown(pics[1], 300, 0);
+  pmove(pics[1], 250, 10);
+  await wait(200);
+  assert.equal(allByClass(week, "img", "s-still")[0].getAttribute("draggable"), "false");
+  pup(pics[1], 250, 1000);
+  const style = week.shadowRoot.querySelector("style").textContent;
+  assert.match(style, /\.s-mark \{[^}]*z-index: 1/);
+  week._current.get("gV").pause();
+});
+
+test("a swap carries each camera's full width and whether it follows Live", async () => {
+  await withClock(async (skew) => {
+    const source = withScrub(withClips(withDetail(fakeSource(), recentDetail())));
+    const week = await openVisit(source);
+    await settle();
+    const { pics } = lanesOf(week);
+    pdown(pics[1], 100, 0);
+    pup(pics[1], 100, 10); // the garage full width
+    const newer = recentDetail();
+    newer.visit.headline = "NEWER VERSION HEADLINE";
+    source.detail = async () => newer;
+    skew(10000);
+    source.push([guardStory("gV", { title: TRIAL_TITLE, updated: NEWER })]);
+    await settle();
+    await settle();
+    await settle();
+    assert.ok(texts(week).includes("NEWER VERSION HEADLINE"));
+    assert.ok(lanesOf(week).players[1].getAttribute("class").includes("s-full"));
+    assert.equal(lanesOf(week).clocks[0].textContent, "Live");
+    week._current.get("gV").pause();
+  });
+});
+
+test("a story that leaves the list, or a new source, stops its cameras", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), recentDetail())));
+  const week = await openVisit(source);
+  await settle();
+  await settle();
+  const block = week._current.get("gV");
+  assert.equal(liveShown(block).length, 1);
+  source.push([]);
+  await settle();
+  assert.equal(liveShown(block).length, 0);
+
+  const second = withScrub(withClips(withDetail(fakeSource(), recentDetail())));
+  const other = await openVisit(second);
+  await settle();
+  await settle();
+  const shown = other._current.get("gV");
+  const next = withScrub(withClips(withDetail(fakeSource(), recentDetail())));
+  other.source = next;
+  next.push([guardStory("gV", { title: TRIAL_TITLE })]);
+  await settle();
+  assert.equal(liveShown(shown).length, 0);
+  other._current.get("gV")?.pause();
+});
+
+test("opening a row again picks its cameras up where they were", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), recentDetail())));
+  const week = await openVisit(source);
+  await settle();
+  await settle();
+  const block = week._current.get("gV");
+  openFirst(week); // closed
+  assert.equal(liveShown(block).length, 0);
+  openFirst(week); // open again
+  await settle();
+  await settle();
+  assert.equal(liveShown(block).length, 1);
+  block.pause();
+});
+
+test("letting go after a drag in sync puts every camera on its exact frame", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  withClass(week, "button", "s-sync").dispatch("click");
+  const { tapes, videos } = lanesOf(week);
+  const exact = [0, 0];
+  videos.forEach((v, i) => {
+    v.readyState = 4;
+    v.fastSeek = () => {};
+    Object.defineProperty(v, "currentTime", { get: () => 0, set: () => exact[i]++ });
+  });
+  pdown(tapes[0], 300, 0);
+  pmove(tapes[0], 250, 10);
+  exact[0] = exact[1] = 0;
+  pup(tapes[0], 250, 1000); // held still before letting go: no glide
+  assert.ok(exact[0] > 0 && exact[1] > 0);
+  week._current.get("gV").pause();
+});
+
+test("each Live picture lets the one before it go, and the newest of several is shown", async () => {
+  const made = [];
+  const revoked = [];
+  const realCreate = URL.createObjectURL;
+  const realRevoke = URL.revokeObjectURL;
+  URL.createObjectURL = (blob) => {
+    made.push(blob);
+    return `blob:test/${made.length}`;
+  };
+  URL.revokeObjectURL = (url) => revoked.push(url);
+  try {
+    const source = withScrub(withClips(withDetail(fakeSource(), recentDetail())));
+    const week = await openVisit(source);
+    await settle();
+    await settle();
+    const stream = liveStreams.at(-1);
+    const a = livePart(new Uint8Array([1]));
+    const b = livePart(new Uint8Array([2]));
+    const both = new Uint8Array(a.length + b.length);
+    both.set(a);
+    both.set(b, a.length);
+    stream.push(both); // two pictures in one read
+    await settle();
+    assert.deepEqual([...new Uint8Array(await made.at(-1).arrayBuffer())], [2]);
+    assert.deepEqual(revoked, ["blob:test/1"]);
+    assert.equal(liveShown(week._current.get("gV"))[0].src, `blob:test/${made.length}`);
+    week._current.get("gV").pause();
+    assert.deepEqual(revoked, ["blob:test/1", `blob:test/${made.length}`]);
+  } finally {
+    URL.createObjectURL = realCreate;
+    URL.revokeObjectURL = realRevoke;
+  }
+});
+
+test("a Live stream that keeps sending pictures stays Live past 5 s", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), recentDetail())));
+  const week = await openVisit(source);
+  await settle();
+  await settle();
+  const stream = liveStreams.at(-1);
+  for (let i = 0; i < 14; i++) {
+    await wait(500);
+    stream.push();
+  }
+  assert.equal(lanesOf(week).clocks[0].textContent, "Live");
+  assert.ok(!texts(week).includes("Live stopped"));
+  week._current.get("gV").pause();
 });
