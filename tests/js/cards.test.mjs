@@ -3991,3 +3991,89 @@ test("a Live stream that keeps sending pictures stays Live past 5 s", async () =
   assert.ok(!texts(week).includes("Live stopped"));
   week._current.get("gV").pause();
 });
+
+// --- picking a time ---------------------------------------------------------------------------
+
+const pad2 = (n) => String(n).padStart(2, "0");
+function localInput(t) {
+  const d = new Date(t * 1000);
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}T${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+}
+
+test("a camera's clock is a button that opens a date and time picker at that moment", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  const whens = allByClass(week, "button", "s-when");
+  assert.equal(whens.length, 2);
+  assert.equal(whens[0].getAttribute("aria-label"), "Pick a time for Sidewalk");
+  assert.ok(whens[0].querySelector("span").getAttribute("class").includes("s-clock"));
+  const inputs = allByClass(week, "input", "s-time");
+  assert.equal(inputs[0].getAttribute("type"), "datetime-local");
+  assert.equal(inputs[0].getAttribute("step"), "1");
+  whens[0].dispatch("click");
+  assert.equal(document.activeElement, inputs[0]);
+  assert.equal(inputs[0].value, localInput(Math.floor(Date.parse(visitDetail().visit.stops[0].time) / 1000)));
+  assert.ok(Math.abs(Date.parse(inputs[0].max) - Date.now()) < 2000); // now, to the second
+  week._current.get("gV").pause();
+});
+
+test("the picker opens the browser's own wheel when it has one", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  const input = allByClass(week, "input", "s-time")[0];
+  let shown = 0;
+  input.showPicker = () => shown++;
+  allByClass(week, "button", "s-when")[0].dispatch("click");
+  assert.equal(shown, 1);
+  week._current.get("gV").pause();
+});
+
+test("a time picked moves that camera there; in sync, every camera", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  const inputs = allByClass(week, "input", "s-time");
+  const target = Math.floor(Date.now() / 1000) - 7200;
+  const garage = timeOf(week, 1);
+  inputs[0].value = localInput(target);
+  inputs[0].dispatch("change", { target: inputs[0] });
+  assert.equal(timeOf(week, 0), Math.round(target / 5) * 5);
+  assert.equal(timeOf(week, 1), garage);
+  withClass(week, "button", "s-sync").dispatch("click");
+  inputs[1].value = localInput(target - 600);
+  inputs[1].dispatch("change", { target: inputs[1] });
+  assert.equal(timeOf(week, 0), Math.round((target - 600) / 5) * 5);
+  assert.equal(timeOf(week, 1), Math.round((target - 600) / 5) * 5);
+  week._current.get("gV").pause();
+});
+
+test("a time picked within the last minute or so is Live; one not a time is ignored", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  const input = allByClass(week, "input", "s-time")[0];
+  const before = timeOf(week, 0);
+  input.value = "";
+  input.dispatch("change", { target: input });
+  assert.equal(timeOf(week, 0), before);
+  input.value = localInput(Math.floor(Date.now() / 1000) - 10);
+  input.dispatch("change", { target: input });
+  await settle();
+  assert.equal(lanesOf(week).clocks[0].textContent, "Live");
+  week._current.get("gV").pause();
+});
+
+test("in sync, the shared clock picks a time for every camera", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  withClass(week, "button", "s-sync").dispatch("click");
+  const shared = withClass(week, "button", "s-shared-when");
+  assert.equal(shared.getAttribute("aria-label"), "Pick a time for every camera");
+  const input = withClass(week, "input", "s-shared-time");
+  shared.dispatch("click");
+  assert.equal(document.activeElement, input);
+  const target = Math.floor(Date.now() / 1000) - 3000;
+  input.value = localInput(target);
+  input.dispatch("change", { target: input });
+  assert.equal(timeOf(week, 0), Math.round(target / 5) * 5);
+  assert.equal(timeOf(week, 1), Math.round(target / 5) * 5);
+  week._current.get("gV").pause();
+});

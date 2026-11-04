@@ -180,6 +180,9 @@ const STYLE = `
   .s-head { position: absolute; left: calc(50% - 1px); top: 0; bottom: 4px; width: 2px; border-radius: 1px; background: var(--primary-text-color, #212121); }
   .s-key { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; opacity: 0; }
   .s-key:focus-visible + .s-head { background: var(--hs-family); }
+  .s-when, .s-shared-when { min-height: 28px; padding: 0; background: none; border: 0; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+  .s-when:focus-visible, .s-shared-when:focus-visible { outline: 2px solid var(--hs-family); outline-offset: 2px; }
+  .s-time, .s-shared-time { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; opacity: 0; }
   .s-read { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin-top: 2px; }
   .s-clock { font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; }
   .s-rel { font-size: 13px; white-space: nowrap; color: var(--secondary-text-color, #616161); }
@@ -716,6 +719,29 @@ function multipartParts(buffer) {
   return { parts, rest: buffer.slice(at) };
 }
 
+// A moment as a date and time picker shows it (local time, to the second), and back.
+const pad2 = (n) => String(n).padStart(2, "0");
+function localInputOf(t) {
+  const d = new Date(Math.floor(t) * 1000);
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}T${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+}
+function epochOfLocal(value) {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?$/.test(value)) return null;
+  const ms = new Date(value).getTime(); // no zone given: local time
+  return Number.isFinite(ms) ? ms / 1000 : null;
+}
+// Open the picker at a moment: the browser's own wheel where it has one, else the box.
+function openPicker(input, t, now) {
+  input.value = localInputOf(t);
+  input.max = localInputOf(now);
+  try {
+    if (typeof input.showPicker === "function") input.showPicker();
+    else input.focus?.();
+  } catch {
+    input.focus?.(); // a browser that won't show it from here
+  }
+}
+
 const epochOf = (iso) => {
   const ms = typeof iso === "string" ? Date.parse(iso) : NaN;
   return Number.isFinite(ms) ? ms / 1000 : null;
@@ -768,10 +794,24 @@ function scrubView(source, alertAt, barSlot) {
   const syncButton = el("button", { class: "s-sync", type: "button", "aria-pressed": "false" }, el("span", { class: "s-track" }, thumb), el("span", {}, "Keep in sync"));
   const lineUp = alertAt === null ? null : el("button", { class: "s-line", type: "button" }, "Line up at the alert");
   const sharedClock = el("span", { class: "s-big" });
+  const sharedWhen = el("button", { class: "s-shared-when", type: "button", "aria-label": "Pick a time for every camera" }, sharedClock);
+  const sharedTime = el("input", { class: "s-shared-time", type: "datetime-local", step: "1", "aria-label": "Every camera: pick a time" });
   const sharedRel = el("span", { class: "s-sub" });
   const playAllWord = el("span", {}, "Play all");
   const playAll = el("button", { class: "s-all", type: "button", "aria-label": "Play every camera together" }, playAllWord);
-  const shared = el("div", { class: "s-shared" }, el("div", {}, sharedClock, sharedRel), playAll);
+  const shared = el("div", { class: "s-shared" }, el("div", {}, sharedWhen, sharedRel, sharedTime), playAll);
+  sharedWhen.addEventListener("click", () => {
+    touch();
+    const lane = ctl.last ?? lanes[0];
+    if (lane) openPicker(sharedTime, lane.t, now());
+  });
+  sharedTime.addEventListener("change", (event) => {
+    const t = epochOfLocal((event.target ?? sharedTime).value);
+    const lane = ctl.last ?? lanes[0];
+    if (t === null || !lane) return;
+    touch();
+    move(lane, t, false); // in sync: every camera
+  });
   const row = el("div", { class: "s-row" }, syncButton, lineUp);
   const bar = el("div", { class: "s-bar" }, row);
 
@@ -975,8 +1015,10 @@ function scrubView(source, alertAt, barSlot) {
     const keys = el("input", { class: "s-key", type: "range", step: "5", min: "0", "aria-label": `${name}: move through time` });
     const tape = el("div", { class: "s-tape" }, el("span", { class: "s-base" }), strip, keys, el("span", { class: "s-head" }));
     const clock = el("span", { class: "s-clock" });
+    const when = el("button", { class: "s-when", type: "button", "aria-label": `Pick a time for ${name}` }, clock);
+    const timeInput = el("input", { class: "s-time", type: "datetime-local", step: "1", "aria-label": `${name}: pick a time` });
     const rel = el("span", { class: "s-rel" });
-    const player = el("div", { class: "s-player" }, pic, tape, el("div", { class: "s-read" }, clock, rel));
+    const player = el("div", { class: "s-player" }, pic, tape, el("div", { class: "s-read" }, when, rel, timeInput));
     const failed = new Map(); // a minute's key -> when it couldn't be had
     let stillTimer = null;
     let deadTimer = null;
@@ -1362,6 +1404,16 @@ function scrubView(source, alertAt, barSlot) {
       ctl.last = self;
       if (self.playing) self.pause();
       else self.play();
+    });
+    when.addEventListener("click", () => {
+      touch();
+      openPicker(timeInput, self.t, now());
+    });
+    timeInput.addEventListener("change", (event) => {
+      const t = epochOfLocal((event.target ?? timeInput).value);
+      if (t === null) return;
+      touch();
+      move(self, t, false); // in sync, every camera; near now, Live
     });
     keys.addEventListener("focus", () => {
       ctl.focus = self;
