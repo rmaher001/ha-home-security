@@ -399,6 +399,7 @@ async def test_unloading_cuts_a_streaming_response(
         ("GET", f"api/v1/cameras/{CAM}/detections/1793760000-1793763600"),
         ("GET", f"api/v1/cameras/{CAM}/live"),
         ("GET", f"api/v1/cameras/{CAM}/timelapse/1793760600.mp4"),
+        ("GET", f"api/v1/cameras/{CAM}/recent/1793761200.mp4"),
     ],
 )
 def test_ordinary_routes_are_open_to_any_signed_in_user(method: str, path: str) -> None:
@@ -555,6 +556,15 @@ BLOCKED = [
     ("GET", f"api/v1/cameras/{CAM}/timelapse/"),
     ("POST", f"api/v1/cameras/{CAM}/timelapse/1793760600.mp4"),
     ("GET", f"api/v1/cameras/{CAM}/timelapse/%2e%2e/1793760600.mp4"),
+    ("GET", f"api/v1/cameras/{CAM}/recent/1793761200xmp4"),  # the dot is a dot
+    ("GET", f"api/v1/cameras/{CAM}/recent/179376120.mp4"),  # nine digits
+    ("GET", f"api/v1/cameras/{CAM}/recent/17937612000.mp4"),  # eleven
+    ("GET", f"api/v1/cameras/{CAM}/recent/1793761200.mp4/"),
+    ("GET", f"api/v1/cameras/{CAM}/recent/1793761200-low.mp4"),
+    ("GET", f"api/v1/cameras/{CAM}/recent/1793761200.jpg"),
+    ("GET", f"api/v1/cameras/{CAM}/recent/"),
+    ("POST", f"api/v1/cameras/{CAM}/recent/1793761200.mp4"),
+    ("GET", f"api/v1/cameras/{CAM}/recent/%2e%2e/1793761200.mp4"),
     ("GET", f"api/v1/cameras/{CAM}/detections/1793760000"),
     ("GET", f"api/v1/cameras/{CAM}/detections/1793760000-"),
     ("GET", f"api/v1/cameras/{CAM}/detections/1793760000-179376360"),
@@ -690,6 +700,20 @@ async def test_a_cameras_timelapse_streams_through_and_can_be_sought(
     assert part.headers["Content-Range"] == f"bytes 5-14/{len(CLIP)}"
     assert await part.read() == CLIP[5:15]
     assert engine.echoes[-1]["headers"]["Range"] == "bytes=5-14"
+
+
+async def test_a_cameras_recent_copy_passes_its_start_and_end_times_through(
+    hass: HomeAssistant, engine: FakeEngine, browser, clock: Clock
+) -> None:
+    """The card seeks that file by the first frame's time, so the headers must reach it."""
+    resp = await browser.get(f"{BASE}/api/v1/cameras/{CAM}/recent/1793761200.mp4")
+    assert resp.status == 200
+    assert resp.headers["Content-Type"] == "video/mp4"
+    assert resp.headers["Cache-Control"] == "no-store"
+    assert resp.headers["X-Clip-Start"] == "1793761198.480"
+    assert resp.headers["X-Clip-End"] == "1793761259.120"
+    assert await resp.read() == CLIP
+    assert engine.echoes[-1]["path"] == f"/api/v1/cameras/{CAM}/recent/1793761200.mp4"
 
 
 async def test_live_passes_through_a_frame_at_a_time(

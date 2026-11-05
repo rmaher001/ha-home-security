@@ -115,6 +115,7 @@ class FakeEngine:
         app.router.add_get("/api/v1/stories/{id}/clip/{stop}.mp4", self._clip)
         app.router.add_get("/api/v1/cameras/{camera}/footage/{minute}-{quality}.mp4", self._footage)
         app.router.add_get("/api/v1/cameras/{camera}/timelapse/{block}.mp4", self._footage)
+        app.router.add_get("/api/v1/cameras/{camera}/recent/{start}.mp4", self._recent)
         app.router.add_get("/api/v1/cameras/{camera}/live", self._live)
         app.router.add_post("/api/v1/stories/{id}/fine", self._fine)
         app.router.add_post("/api/v1/stories/{id}/learn", self._learn)
@@ -296,6 +297,20 @@ class FakeEngine:
                 headers={"Content-Range": f"bytes {start}-{end}/{len(CLIP)}"},
             )
         return web.Response(body=CLIP, content_type="video/mp4")
+
+    async def _recent(self, request: web.Request) -> web.Response:
+        """The engine's own copy of a camera's last minutes: a whole file, its times in headers."""
+        if not self._authorized(request):
+            return self._refuse()
+        return web.Response(
+            body=CLIP,
+            content_type="video/mp4",
+            headers={
+                "Cache-Control": "no-store",
+                "X-Clip-Start": "1793761198.480",
+                "X-Clip-End": "1793761259.120",
+            },
+        )
 
     async def _live(self, request: web.Request) -> web.StreamResponse:
         """Live: a frame at a time, the next only after the viewer saw the first."""

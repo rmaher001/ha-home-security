@@ -191,6 +191,16 @@ and `Authorization: Bearer <paired key>` counts as signed in. `?story=<id>` open
     `api/v1/stories/<id>/clip/<stop>.mp4` (stop is one to three digits); `POST
     api/v1/stories/<id>/fine`; `PUT api/v1/mode`, `api/v1/alerts`; `GET api/v1/ws` as a
     websocket.
+  - anyone signed in, a camera through time on the event page: `GET api/v1/cameras`;
+    `api/v1/cameras/<camera>/footage/<minute>-<low|full>.mp4`, `.../frame/<time>.jpg`,
+    `.../detections/<from>-<to>`, `.../live`, `.../timelapse/<time>.mp4` and
+    `.../recent/<time>.mp4` (a camera is 24 lowercase hex characters; times are ten-digit epoch
+    seconds). `recent` is the engine's own copy of the camera's last 180 seconds, one whole
+    `video/mp4` (sound when the camera has it, from the camera's low stream) from the last
+    keyframe at or before `<time>` up to now, `Cache-Control: no-store`. The answer's
+    `X-Clip-Start` (epoch seconds, three decimals) is the time of the clip's first frame, which
+    can be a couple of seconds before `<time>`, and `X-Clip-End` the time of its newest packet;
+    both reach the browser unchanged. `404` when the engine holds nothing for that moment.
   - administrators only (`403` for anyone else): `GET`/`POST page/setup`, `POST page/restore`,
     `POST page/pair`, `POST api/v1/stories/<id>/learn` (a kept note changes what the guard
     reads at every look), and the setup page's notes for the guard: `GET api/v1/guard/notes`,

@@ -248,6 +248,9 @@ _ROUTES: tuple[tuple[str, re.Pattern[str], str], ...] = tuple(
         ("GET", rf"api/v1/cameras/{_CAMERA}/live", "open"),
         # A ten-minute block as a timelapse, for scrubbing fast (video, sought by byte range).
         ("GET", rf"api/v1/cameras/{_CAMERA}/timelapse/[0-9]{{10}}\.mp4", "open"),
+        # The engine's own copy of a camera's last few minutes, from the keyframe at or before
+        # the moment to now (one whole video; X-Clip-Start / X-Clip-End carry its times).
+        ("GET", rf"api/v1/cameras/{_CAMERA}/recent/[0-9]{{10}}\.mp4", "open"),
         ("POST", rf"api/v1/stories/{_ID}/fine", "open"),
         ("PUT", r"api/v1/mode", "open"),
         ("PUT", r"api/v1/alerts", "open"),
