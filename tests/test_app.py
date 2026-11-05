@@ -560,6 +560,9 @@ BLOCKED = [
     ("GET", f"api/v1/cameras/{CAM}/timelapse/"),
     ("POST", f"api/v1/cameras/{CAM}/timelapse/1793760600.mp4"),
     ("GET", f"api/v1/cameras/{CAM}/timelapse/%2e%2e/1793760600.mp4"),
+    ("GET", "iconXsvg"),  # the dot is a dot
+    ("GET", "faviconxico"),
+    ("GET", "apple-touch-iconxpng"),
     ("GET", "icon.svgx"),
     ("GET", "icons.svg"),
     ("GET", "icon.svg/"),
@@ -571,6 +574,10 @@ BLOCKED = [
     ("POST", "icon.svg"),
     ("PUT", "favicon.ico"),
     ("GET", "page/icon.svg"),
+    ("GET", f"api/v1/cameras/{CAM.upper()}/recent/1793761200.mp4"),  # a camera id is lower case
+    ("GET", f"api/v1/cameras/{CAM}0/recent/1793761200.mp4"),  # and exactly 24 long
+    ("GET", "api/v1/cameras/abc/recent/1793761200.mp4"),  # and not too short
+    ("GET", "api/v1/cameras/ZZZ/recent/1793761200.mp4"),
     ("GET", f"api/v1/cameras/{CAM}/recent/1793761200xmp4"),  # the dot is a dot
     ("GET", f"api/v1/cameras/{CAM}/recent/179376120.mp4"),  # nine digits
     ("GET", f"api/v1/cameras/{CAM}/recent/17937612000.mp4"),  # eleven

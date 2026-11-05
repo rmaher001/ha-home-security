@@ -1233,6 +1233,9 @@ function scrubView(source, alertAt, barSlot) {
       if (typeof source.recentUrl !== "function") return false;
       const hit = clipAt(self.t);
       if (hit) {
+        // Asked for because Protect said 425: the copy says so too for a while, so Protect is
+        // not asked again on every redraw.
+        if (engine && !hit.clip.hold) hit.clip.hold = { minute, at: now() };
         if (self.key === hit.clip.key) return true;
         self.key = hit.clip.key;
         say("");
@@ -1285,6 +1288,7 @@ function scrubView(source, alertAt, barSlot) {
         const answer = await fetch(url, { cache: "no-store", signal: mine.abort?.signal });
         if (!answer.ok) throw new Error(`recent copy ${answer.status}`);
         const start = Number.parseFloat(answer.headers.get("X-Clip-Start"));
+        if (!Number.isFinite(start)) throw new Error("recent copy with no start time");
         const end = Number.parseFloat(answer.headers.get("X-Clip-End"));
         const blob = await answer.blob();
         if (ask !== mine) return; // taken Live, put to sleep or moved on meanwhile
@@ -1527,9 +1531,11 @@ function scrubView(source, alertAt, barSlot) {
         if (clip?.key === key) {
           // The browser won't play the engine's copy: not fetched again for a while; the lane
           // waits for the minute meanwhile.
-          badUntil = now() + RECENT_BAD_S;
-          if (key === self.key) waitForMinute(minuteOf(self.t));
-          return;
+          if (key === self.key) {
+            badUntil = now() + RECENT_BAD_S;
+            waitForMinute(minuteOf(self.t));
+          }
+          return; // (one out of sight is just let go)
         }
         if (key !== self.key) {
           failed.set(key, now());
@@ -1895,7 +1901,8 @@ function scrubView(source, alertAt, barSlot) {
         const at = copy.start + (front.currentTime || 0);
         if (self.key === copy.key || Math.abs(at - self.t) < 3) self.t = at;
         // Near its end: the next copy loads out of sight, once, so it can follow with no gap.
-        if (!copy.tried && copy.end - self.t <= RECENT_NEXT_S) {
+        // (Not while the owner's own ask is on its way: this one would take its place.)
+        if (!copy.tried && copy.end - self.t <= RECENT_NEXT_S && (ask === null || ask.ahead)) {
           copy.tried = true;
           fetchRecent(minuteOf(copy.end), false, copy);
         }
@@ -1948,6 +1955,7 @@ function scrubView(source, alertAt, barSlot) {
       clearTimeout(stillTimer);
       clearTimeout(ticksTimer);
       clearTimeout(againTimer);
+      clearTimeout(dragTimer);
       againTimer = null;
       waitingFor = null;
       dropAsk();

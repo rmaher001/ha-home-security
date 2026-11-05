@@ -7121,3 +7121,167 @@ test("an ask on its way is replaced when the owner goes even a second before the
     }
   });
 });
+
+// --- round 2 of the review of the recent copy (#48) ---
+
+test("the next copy is not asked for while the owner's own ask is on its way", async () => {
+  await withStillClock(async (advance) => {
+    let open;
+    const gate = new Promise((resolve) => (open = resolve));
+    let asks = 0;
+    const { source, week, nowS, restore, videos, btns, keys } = await scrubbedIntoRecent(async ({ asked }) => {
+      if (asks++ === 0) return { start: asked - 2, end: Math.floor(Date.now() / 1000) };
+      await gate; // the owner's jump: slow
+      return { start: asked - 2, end: asked + 30 };
+    });
+    try {
+      const front = videos[0];
+      front.play = () => Promise.resolve();
+      clipLoaded(front);
+      btns[0].dispatch("click");
+      advance(30000);
+      keys[0].dispatch("input", { target: { value: String(nowS + 10) } }); // past the copy: asked for, slowly
+      await wait(250); // the copy playing is past its end: the next one would load, a tick later
+      assert.equal(source.recentAsked.length, 2); // not while the owner's ask is waiting
+      assert.equal(source.recentAsked[1][1], Math.floor(nowS + 10));
+      open();
+      await wait(100);
+      assert.ok(lanesOf(week).videos.some((v) => v.src.startsWith("blob:")));
+      week._current.get("gV").pause();
+    } finally {
+      restore();
+    }
+  });
+});
+
+test("a next copy that won't play does not stop the engine's copies being fetched for the front", async () => {
+  await withStillClock(async (advance) => {
+    const { source, week, restore, videos, btns } = await scrubbedIntoRecent(({ asked }) => ({ start: asked - 2, end: Math.floor(Date.now() / 1000) }));
+    try {
+      const front = videos[0];
+      front.play = () => Promise.resolve();
+      clipLoaded(front);
+      btns[0].dispatch("click");
+      advance(10000);
+      front.currentTime = 19.5;
+      await wait(150);
+      assert.equal(source.recentAsked.length, 2);
+      lanesOf(week).standbys[0].dispatch("error"); // the out-of-sight one is broken
+      await wait(100);
+      dragBy(week, 100, 60, 10000); // 24 s back: before the copy on show began
+      await wait(100);
+      assert.equal(source.recentAsked.length, 3); // the engine is still asked
+      week._current.get("gV").pause();
+    } finally {
+      restore();
+    }
+  });
+});
+
+test("a next copy with no usable start time is not used", async () => {
+  await withStillClock(async (advance) => {
+    let asks = 0;
+    const { source, week, restore, videos, btns } = await scrubbedIntoRecent(({ asked }) => {
+      if (asks++ === 0) return { start: asked - 2, end: Math.floor(Date.now() / 1000) };
+      return { end: asked + 60 }; // no X-Clip-Start
+    });
+    try {
+      const front = videos[0];
+      front.play = () => Promise.resolve();
+      clipLoaded(front);
+      btns[0].dispatch("click");
+      advance(10000);
+      front.currentTime = 19.5;
+      await wait(150);
+      assert.equal(source.recentAsked.length, 2);
+      assert.equal(lanesOf(week).standbys[0].src || "", "");
+      week._current.get("gV").pause();
+    } finally {
+      restore();
+    }
+  });
+});
+
+test("a recent copy shown without the engine's say-so is asked of Protect once after the minute is whole, not on every redraw", async () => {
+  await withStillClock(async (advance) => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (url, options) => (String(url).startsWith("/footage/") ? Promise.resolve({ status: 425 }) : real(url, options));
+    const { source, week, nowS, restore, videos, keys } = await scrubbedIntoRecent(({ asked }) => ({ start: asked - 2, end: Math.floor(Date.now() / 1000) }));
+    try {
+      clipLoaded(videos[0]);
+      advance(120000); // the minute is long past SETTLE_S
+      const footage = () => source.footageAsked.filter(([camera]) => camera === "cam-side").length;
+      for (let i = 0; i < 4; i++) {
+        keys[0].dispatch("input", { target: { value: String(nowS - 18 - i) } });
+        await wait(60);
+        const standby = lanesOf(week).standbys[0];
+        if (standby.src) standby.dispatch("error"); // Protect says 425 (its clock is behind)
+        await wait(60);
+        advance(1000);
+      }
+      assert.equal(footage(), 1);
+      week._current.get("gV").pause();
+    } finally {
+      restore();
+      globalThis.fetch = real;
+    }
+  });
+});
+
+test("a fast drag inside the recent copy seeks to the seconds since the copy began", async () => {
+  await withStillClock(async () => {
+    const { week, restore, videos } = await scrubbedIntoRecent();
+    try {
+      const front = videos[0];
+      clipLoaded(front);
+      const seeks = [];
+      front.fastSeek = (to) => seeks.push(to);
+      const { pics } = lanesOf(week);
+      pdown(pics[0], 100, 20000);
+      pmove(pics[0], 90, 20010); // 4 s forward, button still down
+      assert.ok(seeks.length > 0);
+      assert.equal(seeks.at(-1), 6); // 4 s on from nowS - 20, in a clip that began at nowS - 22 (not the second in the minute)
+      pup(pics[0], 90, 22000);
+      week._current.get("gV").pause();
+    } finally {
+      restore();
+    }
+  });
+});
+
+test("the next copy loading does not change what is on show", async () => {
+  await withStillClock(async (advance) => {
+    const { source, week, restore, videos, btns } = await scrubbedIntoRecent(({ asked }) => ({ start: asked - 2, end: Math.floor(Date.now() / 1000) }));
+    try {
+      const front = videos[0];
+      front.play = () => Promise.resolve();
+      clipLoaded(front);
+      btns[0].dispatch("click");
+      advance(10000);
+      // The standby loads the moment its copy is given to it (before any redraw can tidy up).
+      const standby = lanesOf(week).standbys[0];
+      let src = "";
+      let seeks = 0;
+      let at = 0;
+      Object.defineProperty(standby, "currentTime", { get: () => at, set: (v) => ((at = v), seeks++) });
+      Object.defineProperty(standby, "src", {
+        get: () => src,
+        set: (v) => {
+          src = v;
+          if (v) clipLoaded(standby);
+        },
+      });
+      standby.removeAttribute = () => {};
+      front.currentTime = 19.5;
+      await wait(150);
+      assert.equal(source.recentAsked.length, 2);
+      assert.ok(src.startsWith("blob:"));
+      await wait(400);
+      assert.equal(seeks, 0); // nothing wants it brought forward
+      assert.equal(lanesOf(week).videos[0], front);
+      week._current.get("gV").pause();
+    } finally {
+      restore();
+    }
+  });
+});
