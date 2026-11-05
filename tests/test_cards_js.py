@@ -17,7 +17,7 @@ def test_cards_js() -> None:
         ["node", "--test", str(JS_TESTS / "cards.test.mjs"), str(JS_TESTS / "panel.test.mjs")],
         capture_output=True,
         text=True,
-        timeout=60,
+        timeout=180,
         check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr

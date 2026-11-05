@@ -641,6 +641,11 @@ const SETTLE_S = 45;
 const LIVE_EDGE_S = 5; // a camera the owner scrubbed is Live again only this close to now
 const LOAD_AGAIN_S = 10; // a minute Protect hasn't finished is asked for again this often
 const RECENT_SLACK_S = 1; // a moment this far past the end of the engine's recent copy still counts as in it
+const RECENT_NEXT_S = 3; // this near the end of a recent copy that is playing, the next one loads out of sight
+const RECENT_GROWN_S = 0.5; // a copy asked for where one ended must run at least this much further
+const RECENT_DRAG_MS = 250; // a drag this long at rest asks for its recent copy (letting go asks at once)
+const RECENT_BAD_S = 60; // a recent copy the browser wouldn't play is not fetched again for this long
+const RECENT_SAME_S = 1.5; // a moment this close to one that just failed is the same moment
 const TICK_BLOCK_S = 600; // detections are asked for ten minutes at a time
 const TICK_FRESH_S = 30; // the block holding now is asked again this often, near Live
 const RETRY_S = 30; // a minute or a block of detections that failed waits this long
@@ -1094,13 +1099,16 @@ function scrubView(source, alertAt, barSlot) {
     let stillTimer = null;
     let againTimer = null; // a minute Protect hasn't finished is asked for again when it fires
     let waitingFor = null; // the minute the engine said 425 to: not asked for again until the timer
-    // The engine's recent copy of the camera: a video holding one -> {key, start, end, url}; the
-    // newest fetched (null once it has played out); and the ask on its way (0: none).
+    // The engine's recent copy of the camera. A video holding one -> {key, start, end, reach (the
+    // last moment it holds), url, hold (the minute the engine said wasn't whole when it was asked
+    // for, and when), ahead (loaded out of sight for after the one playing), tried}.
     const clipOf = new Map();
-    let recent = null;
-    let recentAsk = 0;
+    let ask = null; // the fetch on its way: {token, asked, engine, minute, ahead, abort}
     let recentSeq = 0;
-    let recentAbort = null;
+    let recentMiss = null; // the moment a fetch failed at (while the timer for the minute runs)
+    let badUntil = 0; // copies the browser wouldn't play: none fetched until this time
+    let chainEnd = null; // where the copy that just played out ended
+    let dragTimer = null;
     let deadTimer = null;
     let ticksTimer = null;
     let liveSince = null; // when the stream last showed a picture
@@ -1133,6 +1141,11 @@ function scrubView(source, alertAt, barSlot) {
       else v.currentTime = offsetIn(v);
     };
     // The front, when it holds the minute wanted; else the standby, which then comes forward.
+    // The video a minute or copy being loaded goes to: the front when it holds nothing.
+    const slotFor = () => {
+      const inFront = held.get(front);
+      return inFront.key === null || inFront.broken ? front : back;
+    };
     const seek = (dragging) => {
       if (held.get(front).key === self.key) seekTo(front, dragging);
       else if (held.get(back).key === self.key && held.get(back).ready) bringForward();
@@ -1162,15 +1175,15 @@ function scrubView(source, alertAt, barSlot) {
 
     // The minute under the centre line, at the quality wanted. One that couldn't be had is
     // not asked for again for RETRY_S; the lane says so meanwhile.
-    async function load() {
+    async function load(dragging = false) {
       const minute = minuteOf(self.t);
       const key = `${minute}-${self.quality}`;
       if (self.key === key) return;
-      if (waitingFor !== null && waitingFor !== minute && againTimer === null) waitingFor = null; // put elsewhere
       // A scrub into a minute Protect hasn't finished (or one it said 425 to a moment ago):
       // the engine's recent copy where it has one, else wait for the minute.
-      if ((self.scrubbed && isLive(self.t, now())) || waitingFor === minute) {
-        if (!wantRecent(minute)) waitForMinute(minute);
+      const engine = (againTimer !== null && waitingFor === minute) || holdFor(minute) || (ask !== null && ask.engine && ask.minute === minute);
+      if ((self.scrubbed && isLive(self.t, now())) || engine) {
+        if (!wantRecent(minute, engine, dragging)) waitForMinute(minute);
         return;
       }
       const missed = failed.get(key);
@@ -1192,28 +1205,39 @@ function scrubView(source, alertAt, barSlot) {
         return;
       }
       // The first minute goes straight to the front; any other loads out of sight.
-      const into = inFront.key === null || inFront.broken ? front : back;
+      const into = slotFor();
       swapWhenReady = into === back;
       await fill(into, minute, self.quality, () => self.key === key);
     }
-    // The video holding the engine's recent copy (and the copy), if one is.
-    const clipHeld = () => {
-      if (!recent) return null;
+    // The recent copy held (and its video) that has the moment, the front's first.
+    const clipAt = (t) => {
       for (const v of [front, back]) {
+        const clip = clipOf.get(v);
         const state = held.get(v);
-        if (clipOf.get(v) === recent && state.key === recent.key && !state.broken) return v;
+        if (clip && !clip.done && state.key === clip.key && !state.broken && t >= clip.start && t <= clip.reach) return { v, clip };
       }
       return null;
     };
+    // A copy asked for because the engine said a minute wasn't whole still says so, for a while.
+    const holdFor = (minute) => {
+      for (const v of [front, back]) {
+        const clip = clipOf.get(v);
+        if (clip?.hold && clip.hold.minute === minute && now() - clip.hold.at < SETTLE_S && held.get(v).key === clip.key && !held.get(v).broken) return true;
+      }
+      return false;
+    };
     // The moment is in a minute Protect hasn't finished: show it from the engine's recent copy,
-    // held already (seek it), or fetched now. False when there is no such copy to be had (no
-    // recentUrl, or the timer of a copy that failed is still running): the lane then waits.
-    function wantRecent(minute, engine = false) {
-      if (typeof source.recentUrl !== "function" || typeof fetch !== "function" || againTimer !== null) return false;
-      const v = clipHeld();
-      if (v && self.t >= recent.start && self.t <= recent.end + RECENT_SLACK_S) {
-        if (self.key === recent.key) return true;
-        self.key = recent.key;
+    // held already (seek it) or fetched now (not while a drag is moving: that waits for it to
+    // rest). False when there is none to be had (no recentUrl; a copy the browser rejected; this
+    // same moment just failed): the lane then waits for the minute.
+    function wantRecent(minute, engine, dragging = false) {
+      if (typeof source.recentUrl !== "function" || typeof fetch !== "function" || now() < badUntil) return false;
+      const hit = clipAt(self.t);
+      if (hit) {
+        const { v, clip } = hit;
+        if (self.key === clip.key && !clip.ahead) return true;
+        clip.ahead = false;
+        self.key = clip.key;
         say("");
         if (v === front) {
           swapWhenReady = false;
@@ -1223,60 +1247,114 @@ function scrubView(source, alertAt, barSlot) {
         }
         return true;
       }
-      if (recentAsk === 0) fetchRecent(minute, engine);
+      if (againTimer !== null && recentMiss !== null && Math.abs(recentMiss - self.t) < RECENT_SAME_S) return false;
+      if (ask !== null) {
+        if (!ask.ahead && self.t >= ask.asked - 1) return true; // its copy will have the moment
+        dropAsk(); // wanted earlier than it will reach (or only a copy for later): let it go
+      }
+      if (dragging) {
+        self.key = null;
+        say("");
+        clearTimeout(dragTimer);
+        dragTimer = setTimeout(() => {
+          dragTimer = null;
+          if (!ctl.paused && !self.live) self.draw(false);
+        }, RECENT_DRAG_MS);
+        return true;
+      }
+      fetchRecent(minute, engine);
       return true;
     }
-    // Ask the engine for its copy from the moment wanted; the whole file is kept in memory and
-    // played from there. Where it lands (the front when that holds nothing, else out of sight and
-    // forward when it shows the frame wanted) is as a minute of footage would.
-    async function fetchRecent(minute, engine) {
+    function dropAsk() {
+      ask?.abort?.abort();
+      ask = null;
+    }
+    // Ask the engine for its copy from the moment wanted (or, `ahead`, from where the copy
+    // playing ends, to load out of sight); the whole file is kept in memory and played from
+    // there. Where it lands is as a minute of footage would.
+    async function fetchRecent(minute, engine, ahead = null) {
+      clearTimeout(dragTimer);
+      dragTimer = null;
+      dropAsk();
       const token = ++recentSeq;
-      recentAsk = token;
-      const asked = Math.floor(self.t);
-      self.key = null;
-      say("");
-      wantStill(); // the still for the moment, meanwhile
-      const abort = typeof AbortController === "function" ? new AbortController() : null;
-      recentAbort = abort;
+      const asked = Math.floor(ahead ? ahead.end : self.t);
+      const mine = { token, asked, engine, minute, ahead: ahead !== null, abort: typeof AbortController === "function" ? new AbortController() : null };
+      ask = mine;
+      const chained = !ahead && chainEnd !== null && Math.abs(asked - chainEnd) <= RECENT_SAME_S ? chainEnd : null;
+      if (!ahead) {
+        chainEnd = null;
+        self.key = null;
+        say("");
+        wantStill(); // the still for the moment, meanwhile
+      }
       let clip = null;
       try {
         const url = await source.recentUrl(camera, asked);
-        if (recentAsk !== token) return;
-        const answer = await fetch(url, { cache: "no-store", signal: abort?.signal });
+        if (ask !== mine) return;
+        const answer = await fetch(url, { cache: "no-store", signal: mine.abort?.signal });
         if (!answer.ok) throw new Error(`recent copy ${answer.status}`);
         const start = Number.parseFloat(answer.headers.get("X-Clip-Start"));
         const end = Number.parseFloat(answer.headers.get("X-Clip-End"));
         if (!Number.isFinite(start)) throw new Error("no start time");
         const blob = await answer.blob();
-        if (recentAsk !== token) return; // taken Live, or put to sleep, meanwhile
-        clip = { key: `r${token}`, start, end: Number.isFinite(end) && end > start ? end : now(), url: URL.createObjectURL(blob) };
+        if (ask !== mine) return; // taken Live, put to sleep or moved on meanwhile
+        const last = Number.isFinite(end) && end > start ? end : now();
+        clip = { key: `r${token}`, start, end: last, reach: last + RECENT_SLACK_S, url: URL.createObjectURL(blob), hold: engine ? { minute, at: now() } : null, ahead: false, tried: false };
       } catch {
         /* no copy: handled below */
       }
-      if (recentAsk !== token) return;
-      recentAsk = 0;
-      recentAbort = null;
-      if (clip && self.t >= clip.start && self.t <= clip.end + RECENT_SLACK_S) {
-        placeClip(clip);
+      if (ask !== mine) {
+        if (clip) URL.revokeObjectURL(clip.url);
         return;
       }
-      // Not the engine's to give (nothing there, or it starts after the moment): wait for the
-      // minute. One that doesn't hold the moment only because the owner moved on: look again.
+      ask = null;
+      if (ahead) {
+        // Wanted only if it runs on from the one playing, which is still what is on show.
+        const state = held.get(front);
+        if (clip && clip.end > ahead.end + RECENT_GROWN_S && clipOf.get(front) === ahead && state.key === ahead.key && self.key === ahead.key && !self.live) {
+          clip.ahead = true;
+          putClip(clip, back);
+        } else if (clip) {
+          URL.revokeObjectURL(clip.url);
+        }
+        return;
+      }
       const moved = Math.floor(self.t) !== asked;
+      if (clip && self.t > clip.end + RECENT_SLACK_S && !moved) {
+        // The moment is past the engine's newest picture (the clock here runs ahead of its):
+        // at its live edge. Playing, that is Live; paused, the copy's last frame.
+        if (self.playing) {
+          URL.revokeObjectURL(clip.url);
+          self.scrubbed = false;
+          self.draw(false);
+          return;
+        }
+        clip.reach = self.t + RECENT_SLACK_S;
+      } else if (clip && !moved && chained !== null && clip.end <= chained + RECENT_GROWN_S) {
+        URL.revokeObjectURL(clip.url); // the copy hasn't moved on since the last one: it is not being added to
+        clip = null;
+      }
+      if (clip && self.t >= clip.start && self.t <= clip.reach) {
+        putClip(clip, slotFor());
+        return;
+      }
       if (clip) URL.revokeObjectURL(clip.url);
-      if (clip && moved) self.draw(false);
-      else waitForMinute(minuteOf(self.t), engine);
+      if (moved) {
+        self.draw(false); // the owner has gone elsewhere: look at where that is
+        return;
+      }
+      recentMiss = self.t;
+      waitForMinute(minuteOf(self.t), engine);
     }
-    function placeClip(clip) {
-      recent = clip;
-      const inFront = held.get(front);
-      const into = inFront.key === null || inFront.broken ? front : back;
-      swapWhenReady = into === back;
+    function putClip(clip, into) {
+      if (!clip.ahead) {
+        swapWhenReady = into === back;
+        self.key = clip.key;
+        say("");
+      }
       dropClip(into);
       Object.assign(held.get(into), { key: clip.key, ready: false, broken: false });
       clipOf.set(into, clip);
-      self.key = clip.key;
-      say("");
       into.src = clip.url;
       into.load?.();
     }
@@ -1286,14 +1364,13 @@ function scrubView(source, alertAt, barSlot) {
       if (!clip) return;
       clipOf.delete(v);
       URL.revokeObjectURL(clip.url);
-      if (recent === clip) recent = null;
     }
     // No copy on its way or wanted any more.
     function forgetRecent() {
-      recentAsk = 0;
-      recentAbort?.abort();
-      recentAbort = null;
-      recent = null;
+      dropAsk();
+      clearTimeout(dragTimer);
+      dragTimer = null;
+      chainEnd = null;
     }
     // The owner scrubbed to a minute Protect hasn't finished: no Live, no footage yet. The
     // still for the moment shows (if the engine has one), the lane says so, and the minute is
@@ -1439,14 +1516,28 @@ function scrubView(source, alertAt, barSlot) {
         if (isFront()) self.steady = null;
       });
       v.addEventListener("ended", () => {
-        // The recent copy played out: Live when that is where it got to, else the copy (or
-        // Protect's footage, once its minute is whole) from there on.
+        // The recent copy played out: Live when that is where it got to; else the next copy,
+        // loaded already, comes forward; else one is asked for from here (or Protect's footage,
+        // once its minute is whole).
         const clip = clipOf.get(v);
         if (isFront() && clip && self.playing && held.get(v).key === clip.key && clip.key === self.key) {
           self.t = Math.min(now(), Math.max(self.t, clip.end));
-          if (self.t >= now() - LIVE_EDGE_S) self.scrubbed = false;
-          if (recent === clip) recent = null;
+          clip.done = true; // played out: not the one to look in again
           waitingFor = null;
+          if (self.t >= now() - LIVE_EDGE_S) {
+            self.scrubbed = false;
+          } else {
+            const next = clipOf.get(back);
+            const state = held.get(back);
+            if (next?.ahead && state.key === next.key && state.ready && !state.broken && self.t >= next.start) {
+              next.ahead = false;
+              self.key = next.key;
+              swapWhenReady = true;
+              bringForward();
+              return;
+            }
+            chainEnd = clip.end;
+          }
           self.key = null;
           self.draw(false);
           return;
@@ -1475,12 +1566,14 @@ function scrubView(source, alertAt, barSlot) {
         if (key === null || ctl.paused) return;
         state.broken = true;
         state.ready = false;
-        if (clipOf.get(v)?.key === key) {
-          // The engine's copy won't play: wait for the minute instead.
-          if (recent === clipOf.get(v)) recent = null;
+        const clip = clipOf.get(v);
+        if (clip?.key === key) {
+          // The browser won't play the engine's copy: not fetched again for a while; the lane
+          // waits for the minute meanwhile.
+          badUntil = now() + RECENT_BAD_S;
           if (key === self.key) {
             self.key = null;
-            waitForMinute(minuteOf(self.t), waitingFor === minuteOf(self.t));
+            waitForMinute(minuteOf(self.t), Boolean(clip.hold) && clip.hold.minute === minuteOf(self.t));
           }
           return;
         }
@@ -1503,7 +1596,6 @@ function scrubView(source, alertAt, barSlot) {
           if (self.scrubbed) {
             // Where the owner put it: no snapping to Live. The engine's copy, or the minute's turn.
             const minute = Number.parseInt(key, 10);
-            waitingFor = minute;
             if (!wantRecent(minute, true)) waitForMinute(minute, true);
             return;
           }
@@ -1737,7 +1829,6 @@ function scrubView(source, alertAt, barSlot) {
       if (on) {
         front.pause?.();
         forgetRecent();
-        waitingFor = null;
         for (const v of [front, back, lapse, snd]) show(v, pic, false);
         for (const v of [front, back, lapse]) {
           dropClip(v);
@@ -1827,7 +1918,7 @@ function scrubView(source, alertAt, barSlot) {
       }
       setLive(isNow);
       if (!isNow) {
-        load();
+        load(dragging);
         if (dragging || !self.playing) seek(dragging); // playing, the video is where it plays
         if (dragging) wantStill();
       }
@@ -1849,6 +1940,11 @@ function scrubView(source, alertAt, barSlot) {
         // the owner has put the lane well away from it: its video then waits to be swapped out.)
         const at = copy.start + (front.currentTime || 0);
         if (self.key === copy.key || Math.abs(at - self.t) < 3) self.t = Math.min(now(), at);
+        // Near its end: the next copy loads out of sight, once, so it can follow with no gap.
+        if (!copy.tried && ask === null && self.key === copy.key && !swapWhenReady && copy.end - self.t <= RECENT_NEXT_S && (isLive(copy.end, now()) || (copy.hold && copy.hold.minute === minuteOf(copy.end)))) {
+          copy.tried = true;
+          fetchRecent(minuteOf(copy.end), Boolean(copy.hold), copy);
+        }
       } else if (self.playing && !self.live && self.key !== null && shownMinute === Number.parseInt(self.key, 10) && front.readyState >= 1) {
         // The minute on show, at whatever quality, while another may load: its end belongs
         // to "ended", which goes on to the next.
@@ -1879,7 +1975,7 @@ function scrubView(source, alertAt, barSlot) {
       self.prime();
       if (!self.live && !ctl.paused) {
         load();
-        if (againTimer === null && recentAsk === 0) playFront(); // a minute Protect hasn't finished plays when it comes
+        if (againTimer === null && (ask === null || ask.ahead)) playFront(); // a minute Protect hasn't finished plays when it comes
       }
       run();
     };
