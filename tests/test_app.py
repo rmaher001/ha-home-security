@@ -400,6 +400,10 @@ async def test_unloading_cuts_a_streaming_response(
         ("GET", f"api/v1/cameras/{CAM}/live"),
         ("GET", f"api/v1/cameras/{CAM}/timelapse/1793760600.mp4"),
         ("GET", f"api/v1/cameras/{CAM}/recent/1793761200.mp4"),
+        # The engine page's icons, so the page opened here shows its own.
+        ("GET", "icon.svg"),
+        ("GET", "apple-touch-icon.png"),
+        ("GET", "favicon.ico"),
     ],
 )
 def test_ordinary_routes_are_open_to_any_signed_in_user(method: str, path: str) -> None:
@@ -556,6 +560,17 @@ BLOCKED = [
     ("GET", f"api/v1/cameras/{CAM}/timelapse/"),
     ("POST", f"api/v1/cameras/{CAM}/timelapse/1793760600.mp4"),
     ("GET", f"api/v1/cameras/{CAM}/timelapse/%2e%2e/1793760600.mp4"),
+    ("GET", "icon.svgx"),
+    ("GET", "icons.svg"),
+    ("GET", "icon.svg/"),
+    ("GET", "favicon.ico/"),
+    ("GET", "favicon.icox"),  # the dot is a dot
+    ("GET", "apple-touch-icon.png/x"),
+    ("GET", "apple-touch-icon-precomposed.png"),
+    ("GET", "%2e%2e/icon.svg"),
+    ("POST", "icon.svg"),
+    ("PUT", "favicon.ico"),
+    ("GET", "page/icon.svg"),
     ("GET", f"api/v1/cameras/{CAM}/recent/1793761200xmp4"),  # the dot is a dot
     ("GET", f"api/v1/cameras/{CAM}/recent/179376120.mp4"),  # nine digits
     ("GET", f"api/v1/cameras/{CAM}/recent/17937612000.mp4"),  # eleven
@@ -714,6 +729,15 @@ async def test_a_cameras_recent_copy_passes_its_start_and_end_times_through(
     assert resp.headers["X-Clip-End"] == "1793761259.120"
     assert await resp.read() == CLIP
     assert engine.echoes[-1]["path"] == f"/api/v1/cameras/{CAM}/recent/1793761200.mp4"
+
+
+async def test_the_engine_pages_icons_pass_through(
+    hass: HomeAssistant, engine: FakeEngine, browser, clock: Clock
+) -> None:
+    for name in ("icon.svg", "apple-touch-icon.png", "favicon.ico"):
+        resp = await browser.get(f"{BASE}/{name}")
+        assert resp.status == 200, name
+        assert await resp.read() == b"icon:" + name.encode()
 
 
 async def test_live_passes_through_a_frame_at_a_time(

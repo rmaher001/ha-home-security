@@ -120,6 +120,8 @@ class FakeEngine:
         app.router.add_post("/api/v1/stories/{id}/fine", self._fine)
         app.router.add_post("/api/v1/stories/{id}/learn", self._learn)
         app.router.add_post("/api/v1/sensors", self._sensors)
+        for name in ("icon.svg", "apple-touch-icon.png", "favicon.ico"):
+            app.router.add_get(f"/{name}", self._icon)
         app.router.add_get("/", self._root)
         app.router.add_get("/page/home-security-cards-slow.js", self._slow)
         app.router.add_route("*", "/page/{tail:.*}", self._page)
@@ -279,6 +281,9 @@ class FakeEngine:
         if self.redirect_root:
             raise web.HTTPFound("/page/setup")
         return web.Response(text="<html>app</html>", content_type="text/html")
+
+    async def _icon(self, request: web.Request) -> web.Response:
+        return web.Response(body=b"icon:" + request.path[1:].encode(), content_type="image/png")
 
     async def _page(self, request: web.Request) -> web.Response:
         return web.json_response({"page": request.match_info["tail"]})

@@ -230,6 +230,10 @@ _ROUTES: tuple[tuple[str, re.Pattern[str], str], ...] = tuple(
     for method, pattern, kind in (
         ("GET", r"", "open"),
         ("GET", r"page/home-security-cards-[^/]+\.js", "open"),
+        # The page's own icons, at the root of the page (exact paths).
+        ("GET", r"icon\.svg", "open"),
+        ("GET", r"apple-touch-icon\.png", "open"),
+        ("GET", r"favicon\.ico", "open"),
         ("GET", r"api/v1/state", "open"),
         ("GET", r"api/v1/stories", "open"),
         ("GET", rf"api/v1/stories/{_ID}/picture\.jpg", "open"),

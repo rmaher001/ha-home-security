@@ -186,6 +186,7 @@ and `Authorization: Bearer <paired key>` counts as signed in. `?story=<id>` open
   exact, decoded path, case-sensitively; encoded or doubled dots, slashes and backslashes,
   `//` and trailing-slash variants are refused; everything else is `404`):
   - anyone signed in: `GET` the root; `GET page/home-security-cards-<anything>.js`; `GET
+    icon.svg`, `apple-touch-icon.png` and `favicon.ico` (the page's icons, exact paths); `GET
     api/v1/state`, `api/v1/stories`, `api/v1/stories/<id>/picture.jpg`, `api/v1/stories/<id>/detail`,
     `api/v1/stories/<id>/pictures/<n>.jpg` (n is one to four digits),
     `api/v1/stories/<id>/clip/<stop>.mp4` (stop is one to three digits); `POST
