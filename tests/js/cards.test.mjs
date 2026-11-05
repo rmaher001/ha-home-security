@@ -5505,20 +5505,62 @@ function withRecent(source) {
 // The engine's answer to /recent/ asks: `answer({ asked, camera })` -> { status, start, end } (the
 // X-Clip-Start / X-Clip-End headers), or a promise of it. Returns what undoes it.
 const recentSignals = [];
+const recentFetched = []; // [url, options] of every ask that reached fetch
 function answerRecent(answer) {
   const real = globalThis.fetch;
   globalThis.fetch = async (url, options) => {
     const match = /^\/recent\/([^/]+)\/(\d+)\.mp4$/.exec(String(url));
     if (!match) return real(url, options);
     recentSignals.push(options?.signal);
-    const { status = 200, start, end } = await answer({ camera: match[1], asked: Number(match[2]) });
+    recentFetched.push([String(url), options]);
+    // Like the browser's: an aborted ask rejects at once.
+    const signal = options?.signal;
+    const aborted = new Promise((_, reject) => {
+      const stop = () => reject(new DOMException("aborted", "AbortError"));
+      if (signal?.aborted) stop();
+      signal?.addEventListener("abort", stop);
+    });
+    aborted.catch(() => {});
+    const { status = 200, start, end, blobGate } = await Promise.race([Promise.resolve(answer({ camera: match[1], asked: Number(match[2]) })), aborted]);
     const headers = new Map();
     if (start !== undefined) headers.set("X-Clip-Start", String(start));
     if (end !== undefined) headers.set("X-Clip-End", String(end));
-    return { ok: status === 200, status, headers: { get: (name) => headers.get(name) ?? null }, blob: async () => new Blob(["clip"], { type: "video/mp4" }) };
+    return {
+      ok: status === 200,
+      status,
+      headers: { get: (name) => headers.get(name) ?? null },
+      blob: async () => {
+        await blobGate;
+        return new Blob(["clip"], { type: "video/mp4" });
+      },
+    };
   };
   return () => {
     globalThis.fetch = real;
+  };
+}
+// The object URLs of recent copies made and let go (Live pictures' are left out).
+function trackBlobs() {
+  const made = [];
+  const revoked = [];
+  const realCreate = URL.createObjectURL;
+  const realRevoke = URL.revokeObjectURL;
+  let count = 0;
+  URL.createObjectURL = (blob) => {
+    const url = `blob:test/${count++}`;
+    if (blob.type === "video/mp4") made.push(url);
+    return url;
+  };
+  URL.revokeObjectURL = (url) => {
+    if (made.includes(url)) revoked.push(url);
+  };
+  return {
+    made,
+    revoked,
+    restore() {
+      URL.createObjectURL = realCreate;
+      URL.revokeObjectURL = realRevoke;
+    },
   };
 }
 // Camera 0 dragged 20 s back from Live, in the minute Protect is still recording; the clip the
@@ -5544,6 +5586,8 @@ test("a scrub into a minute Protect hasn't finished plays the engine's recent co
     const { source, week, nowS, restore, videos, clocks } = await scrubbedIntoRecent();
     try {
       assert.deepEqual(source.recentAsked, [["cam-side", nowS - 20]]);
+      assert.equal(recentFetched.at(-1)[1].cache, "no-store"); // never from the browser's cache
+      assert.ok(recentFetched.at(-1)[1].signal); // so it can be let go
       assert.ok(videos[0].src.startsWith("blob:"), videos[0].src); // fetched whole, played from memory
       clipLoaded(videos[0]);
       assert.equal(videos[0].currentTime, 2); // the clip starts 2 s before the moment
@@ -5625,6 +5669,27 @@ test("the clip ending near now hands over to Live; a playing lane only", async (
   });
 });
 
+test("a paused camera's copy ending (as a browser may report) takes it nowhere", async () => {
+  await withStillClock(async (advance) => {
+    const { source, week, nowS, restore, videos, clocks } = await scrubbedIntoRecent();
+    try {
+      clipLoaded(videos[0]);
+      advance(3000);
+      videos[0].dispatch("ended"); // not playing
+      lanesOf(week).btns[0].dispatch("click"); // Play, to see where it is
+      lanesOf(week).btns[0].dispatch("click"); // and Pause
+      await wait(100);
+      assert.notEqual(clocks[0].textContent, "Live");
+      assert.equal(timeOf(week, 0), nowS - 20); // not moved on to the copy's end
+      assert.equal(source.recentAsked.length, 1);
+      assert.ok(!texts(week).includes(WAITING));
+    } finally {
+      restore();
+      week._current.get("gV").pause();
+    }
+  });
+});
+
 test("the clip ending away from now asks for the recent copy again from where it ended", async () => {
   await withStillClock(async (advance) => {
     const { source, week, nowS, restore, videos, btns, clocks } = await scrubbedIntoRecent();
@@ -5657,6 +5722,11 @@ test("once the clip's minute is finished Protect's footage is asked for instead,
       assert.ok(source.footageAsked.some(([camera, m]) => camera === "cam-side" && m === minute));
       assert.equal(source.recentAsked.length, 1);
       assert.ok(!texts(week).includes(WAITING));
+      for (const at of [4, 6, 8, 10, 12]) {
+        videos[0].currentTime = at; // the copy goes on playing while the footage loads: so does the time
+        await wait(60);
+      }
+      assert.equal(timeOf(week, 0), nowS - 10);
     } finally {
       restore();
       week._current.get("gV").pause();
@@ -5699,6 +5769,13 @@ test("a recent copy the engine doesn't have (404) falls back to the still, the n
       assert.equal(timeOf(week, 0), nowS - 20);
       assert.equal(source.recentAsked.length, 1); // not asked again before the 10 s
       assert.ok(again.length > 0);
+      // Another look at the same moment (Play, then the same time picked) doesn't ask either.
+      lanesOf(week).btns[0].dispatch("click");
+      lanesOf(week).keys[0].dispatch("input", { target: { value: String(nowS - 20) } });
+      lanesOf(week).keys[0].dispatch("input", { target: { value: String(nowS - 19) } }); // a second on: the same moment
+      await wait(150);
+      assert.equal(source.recentAsked.length, 1);
+      assert.ok(texts(week).includes(WAITING));
       status = 200;
       again.at(-1)();
       await wait(150);
@@ -5763,6 +5840,10 @@ test("after a 425 the copy keeps that minute unfinished for a while only; later 
       clipLoaded(lanesOf(week).videos[0]);
       await wait(150);
       assert.equal(footage(), 1); // the copy playing doesn't send it back to the footage again and again
+      lanesOf(week).keys[0].dispatch("input", { target: { value: String(t - 3600) } }); // an hour back: whole, and no 425
+      await wait(100);
+      assert.ok(source.footageAsked.some(([camera, m]) => camera === "cam-side" && m === minuteOf(t - 3600)));
+      assert.equal(source.recentAsked.length, 1);
       advance(60000); // the minute is whole by now
       lanesOf(week).keys[0].dispatch("input", { target: { value: String(t - 4) } }); // in it, before the copy began
       await wait(100);
@@ -5778,6 +5859,7 @@ test("after a 425 the copy keeps that minute unfinished for a while only; later 
 
 test("a copy that stops growing is not asked for again in a loop", async () => {
   await withStillClock(async (advance) => {
+    const blobs = trackBlobs();
     let n = 0;
     const { source, week, nowS, restore, videos, btns } = await scrubbedIntoRecent(({ asked }) => (n++ === 0 ? { start: asked - 2, end: Math.floor(Date.now() / 1000) } : { start: asked - 1, end: Math.floor(Date.now() / 1000) - 30 }));
     try {
@@ -5792,8 +5874,11 @@ test("a copy that stops growing is not asked for again in a loop", async () => {
       assert.equal(source.recentAsked.length, asked);
       assert.ok(texts(week).includes(WAITING));
       assert.equal(timeOf(week, 0), nowS);
+      assert.equal(blobs.made.length, 2);
+      assert.deepEqual(blobs.revoked, [blobs.made[1]]); // the refused one is let go
     } finally {
       restore();
+      blobs.restore();
       week._current.get("gV").pause();
     }
   });
@@ -5821,8 +5906,16 @@ test("the next copy loads out of sight as one nears its end, and takes over at i
       assert.ok(standby.src.startsWith("blob:"));
       standby.readyState = 4;
       standby.dispatch("loadeddata");
-      assert.equal(lanesOf(week).videos[0], front); // not before the end
+      await wait(400); // longer than a swap takes when asked for
+      assert.equal(lanesOf(week).videos[0], front); // held back until the first copy ends
+      assert.equal(standby.currentTime || 0, 0);
+      let seeks = 0;
+      let at = 0;
+      Object.defineProperty(standby, "currentTime", { get: () => at, set: (v) => ((at = v), seeks++) });
       front.dispatch("ended");
+      await wait(250); // frames draw: the next copy is sought to where this one ended, once
+      assert.equal(standby.currentTime, 2);
+      assert.equal(seeks, 1);
       standby.dispatch("seeked");
       await wait(50);
       const now = lanesOf(week).videos[0];
@@ -5870,6 +5963,7 @@ test("Play after Pause plays the copy on show even while the next one is on its 
 
 test("a clip whose end is before the moment asked for is the engine's edge: Live when playing", async () => {
   await withStillClock(async () => {
+    const blobs = trackBlobs();
     let open;
     const gate = new Promise((resolve) => (open = resolve));
     const { week, restore, btns, clocks, videos } = await scrubbedIntoRecent(async ({ asked }) => {
@@ -5883,8 +5977,11 @@ test("a clip whose end is before the moment asked for is the engine's edge: Live
       assert.equal(clocks[0].textContent, "Live");
       assert.equal(videos[0].src || "", "");
       assert.ok(!texts(week).includes(WAITING));
+      assert.deepEqual(blobs.revoked, blobs.made); // the copy not used is let go
+      assert.equal(blobs.made.length, 1);
     } finally {
       restore();
+      blobs.restore();
       week._current.get("gV").pause();
     }
   });
@@ -5965,11 +6062,20 @@ test("a copy that won't play isn't fetched again for a minute; Protect's minute 
 
 test("after a failed ask only a repeat of that moment waits; another moment the engine has is asked at once", async () => {
   await withStillClock(async () => {
-    const { source, week, nowS, restore, clocks } = await scrubbedIntoRecent(({ asked }) => (asked === Math.floor(Date.now() / 1000) - 20 ? { status: 404 } : { start: asked - 2, end: Math.floor(Date.now() / 1000) }));
+    let open;
+    const gate = new Promise((resolve) => (open = resolve));
+    const { source, week, nowS, restore, clocks } = await scrubbedIntoRecent(async ({ asked }) => {
+      if (asked === Math.floor(Date.now() / 1000) - 20) return { status: 404 };
+      await gate;
+      return { start: asked - 2, end: Math.floor(Date.now() / 1000) };
+    });
     try {
       await wait(150);
       assert.ok(texts(week).includes(WAITING));
       lanesOf(week).keys[0].dispatch("input", { target: { value: String(Math.floor(nowS) - 40) } });
+      await wait(60);
+      assert.ok(!texts(week).includes(WAITING)); // the note goes while the new ask is on its way
+      open();
       await wait(150);
       assert.equal(source.recentAsked.length, 2);
       assert.deepEqual(source.recentAsked[1], ["cam-side", nowS - 40]);
@@ -6005,9 +6111,11 @@ test("nothing is asked while a drag is still moving; the ask comes after it rest
       await wait(300); // rested (button still down)
       assert.equal(source.recentAsked.length, 1);
       pmove(pics[0], 200, 30); // 40 s back: before what the ask will cover
+      await wait(20);
+      assert.equal(recentSignals[before].aborted, true); // let go at once, not when the drag rests
+      assert.equal(source.recentAsked.length, 1);
       await wait(300);
       assert.equal(source.recentAsked.length, 2);
-      assert.equal(recentSignals[before].aborted, true);
       assert.equal(recentSignals[before + 1].aborted, false);
       pup(pics[0], 200, 2000);
       open();
@@ -6028,6 +6136,7 @@ test("a copy that won't play falls back to the note", async () => {
       videos[0].dispatch("error");
       await wait(150);
       assert.ok(texts(week).includes(WAITING));
+      assert.ok(!texts(week).includes("Couldn't load this minute.")); // a copy's failure is not a minute's
     } finally {
       restore();
       week._current.get("gV").pause();
@@ -6044,7 +6153,12 @@ test("a source without recentUrl waits for the minute as before and asks the eng
       const source = withScrub(withClips(withDetail(fakeSource(), recentDetail())));
       const week = await openVisit(source);
       await settle();
-      dragBy(week, 100, 50, 0);
+      const { pics } = lanesOf(week);
+      pdown(pics[0], 100, 0);
+      pmove(pics[0], 150, 10); // still moving: a source with recent copies would wait for it to rest
+      await wait(60);
+      assert.ok(texts(week).includes(WAITING));
+      pup(pics[0], 150, 2000);
       await wait(300);
       assert.ok(texts(week).includes(WAITING));
       assert.ok(!asked.some((url) => url.includes("/recent/")));
@@ -6177,6 +6291,833 @@ test("each recent copy's object URL is let go when another takes its place, and 
       restore();
       URL.createObjectURL = realCreate;
       URL.revokeObjectURL = realRevoke;
+    }
+  });
+});
+
+// --- what each guard and cleanup around the recent copy is for (mutation review of #48) ---------
+
+// A source whose first recentUrl answer waits for `open()`; `source.gatedAsks` counts those through.
+function gateFirstUrl(source) {
+  let open;
+  const gate = new Promise((resolve) => (open = resolve));
+  const plain = source.recentUrl;
+  let first = true;
+  source.recentUrl = async (camera, start) => {
+    if (first) {
+      first = false;
+      await gate;
+    }
+    return plain(camera, start);
+  };
+  return open;
+}
+const freshScrub = () => withRecent(withScrub(withClips(withDetail(fakeSource(), recentDetail()))));
+const nowSeconds = () => Date.now() / 1000;
+
+test("going Live lets the held recent copy go, and an ask on its way is aborted and places nothing", async () => {
+  await withStillClock(async () => {
+    const blobs = trackBlobs();
+    const { week, restore, videos, clocks } = await scrubbedIntoRecent();
+    try {
+      assert.equal(blobs.made.length, 1);
+      withClass(week, "button", "s-golive").dispatch("click");
+      await settle();
+      assert.equal(clocks[0].textContent, "Live");
+      assert.deepEqual(blobs.revoked, blobs.made);
+      assert.equal(videos[0].src || "", "");
+    } finally {
+      restore();
+      blobs.restore();
+      week._current.get("gV").pause();
+    }
+  });
+  await withStillClock(async () => {
+    const blobs = trackBlobs();
+    let open;
+    const gate = new Promise((resolve) => (open = resolve));
+    const { week, restore, videos } = await scrubbedIntoRecent(async ({ asked }) => {
+      await gate;
+      return { start: asked - 2, end: asked + 20 };
+    });
+    try {
+      withClass(week, "button", "s-golive").dispatch("click");
+      await settle();
+      assert.equal(recentSignals.at(-1).aborted, true);
+      open();
+      await wait(100);
+      assert.equal(blobs.made.length, 0);
+      assert.equal(videos[0].src || "", "");
+    } finally {
+      restore();
+      blobs.restore();
+      week._current.get("gV").pause();
+    }
+  });
+});
+
+test("putting the row to sleep aborts an ask on its way and lets it place nothing", async () => {
+  await withStillClock(async () => {
+    const blobs = trackBlobs();
+    let open;
+    const gate = new Promise((resolve) => (open = resolve));
+    const { week, restore, videos } = await scrubbedIntoRecent(async ({ asked }) => {
+      await gate;
+      return { start: asked - 2, end: asked + 20 };
+    });
+    try {
+      week._current.get("gV").pause(); // asleep
+      assert.equal(recentSignals.at(-1).aborted, true);
+      open();
+      await wait(100);
+      assert.equal(blobs.made.length, 0);
+      assert.equal(videos[0].src || "", "");
+    } finally {
+      restore();
+      blobs.restore();
+    }
+  });
+});
+
+test("an address that comes after a newer ask is not fetched", async () => {
+  await withStillClock(async () => {
+    const source = freshScrub();
+    const open = gateFirstUrl(source);
+    const restore = answerRecent(({ asked }) => ({ start: asked - 2, end: Math.floor(Date.now() / 1000) }));
+    const before = recentFetched.length;
+    try {
+      const week = await openVisit(source);
+      await settle();
+      const nowS = nowSeconds();
+      dragBy(week, 100, 50, 0); // the first ask waits for its address
+      lanesOf(week).keys[0].dispatch("input", { target: { value: String(nowS - 60) } }); // earlier than it will reach
+      await wait(100);
+      assert.equal(recentFetched.length - before, 1); // the second ask fetched
+      open();
+      await wait(100);
+      assert.equal(recentFetched.length - before, 1); // the first, late, did not
+      week._current.get("gV").pause();
+    } finally {
+      restore();
+    }
+  });
+});
+
+test("a copy that finishes downloading after a newer ask is let go unseen", async () => {
+  await withStillClock(async () => {
+    const blobs = trackBlobs();
+    let open;
+    const blobGate = new Promise((resolve) => (open = resolve));
+    let n = 0;
+    const { source, week, nowS, restore, videos } = await scrubbedIntoRecent(({ asked }) => ({ start: asked - 2, end: asked + 15, blobGate: n++ === 0 ? blobGate : undefined }));
+    try {
+      lanesOf(week).keys[0].dispatch("input", { target: { value: String(nowS - 60) } });
+      await wait(100);
+      assert.equal(source.recentAsked.length, 2);
+      assert.equal(blobs.made.length, 1); // the second one's
+      open();
+      await wait(100);
+      assert.equal(blobs.made.length, 1); // the first never became an object URL
+      assert.equal(videos[0].src, blobs.made[0]);
+    } finally {
+      restore();
+      blobs.restore();
+      week._current.get("gV").pause();
+    }
+  });
+});
+
+test("an ask that fails after a newer one began doesn't take that one's place", async () => {
+  await withStillClock(async () => {
+    let open;
+    const gate = new Promise((resolve) => (open = resolve));
+    let n = 0;
+    const { source, week, nowS, restore } = await scrubbedIntoRecent(async ({ asked }) => {
+      if (n++ === 0) {
+        await new Promise(() => {}); // the first never answers; it is aborted
+      }
+      await gate;
+      return { start: asked - 2, end: asked + 15 };
+    });
+    try {
+      lanesOf(week).keys[0].dispatch("input", { target: { value: String(nowS - 60) } });
+      await wait(100);
+      assert.equal(source.recentAsked.length, 2);
+      lanesOf(week).btns[0].dispatch("click"); // another look while the second is still on its way
+      await wait(100);
+      assert.equal(source.recentAsked.length, 2);
+      open();
+      await wait(100);
+      assert.ok(lanesOf(week).videos[0].src.startsWith("blob:"));
+    } finally {
+      restore();
+      week._current.get("gV").pause();
+    }
+  });
+});
+
+test("a copy that arrives when the owner has moved beyond it is let go and the new moment asked for", async () => {
+  await withStillClock(async () => {
+    const blobs = trackBlobs();
+    let open;
+    const gate = new Promise((resolve) => (open = resolve));
+    let n = 0;
+    const { source, week, nowS, restore } = await scrubbedIntoRecent(async ({ asked }) => {
+      if (n++ === 0) {
+        await gate;
+        return { start: asked - 2, end: asked + 3 }; // runs to nowS - 17
+      }
+      return { start: asked - 2, end: Math.floor(Date.now() / 1000) };
+    });
+    try {
+      lanesOf(week).keys[0].dispatch("input", { target: { value: String(nowS - 10) } }); // later than it covers
+      await wait(50);
+      assert.equal(source.recentAsked.length, 1);
+      open();
+      await wait(150);
+      assert.equal(blobs.revoked[0], blobs.made[0]);
+      assert.equal(source.recentAsked.length, 2);
+      assert.deepEqual(source.recentAsked[1], ["cam-side", nowS - 10]);
+      assert.ok(!texts(week).includes(WAITING));
+      assert.ok(lanesOf(week).videos[0].src.startsWith("blob:"));
+    } finally {
+      restore();
+      blobs.restore();
+      week._current.get("gV").pause();
+    }
+  });
+});
+
+test("the ask goes out whole seconds, whatever fraction the drag left", async () => {
+  await withStillClock(async () => {
+    const source = freshScrub();
+    const restore = answerRecent(({ asked }) => ({ start: asked - 2, end: Math.floor(Date.now() / 1000) }));
+    try {
+      const week = await openVisit(source);
+      await settle();
+      const nowS = nowSeconds();
+      dragBy(week, 100, 51, 0); // 20.4 s back
+      await wait(100);
+      assert.deepEqual(source.recentAsked, [["cam-side", nowS - 21]]);
+      week._current.get("gV").pause();
+    } finally {
+      restore();
+    }
+  });
+});
+
+test("a moment up to a second past the copy's end is still in it; beyond that the copy is asked for again", async () => {
+  await withStillClock(async () => {
+    const source = freshScrub();
+    const restore = answerRecent(({ asked }) => (asked === Math.floor(Date.now() / 1000) - 30 ? { start: asked - 2, end: asked + 10.5 } : { start: asked - 2, end: Math.floor(Date.now() / 1000) }));
+    try {
+      const week = await openVisit(source);
+      await settle();
+      const nowS = nowSeconds();
+      dragBy(week, 100, 75, 0); // 30 s back; the copy runs to nowS - 19.5
+      await wait(100);
+      assert.equal(source.recentAsked.length, 1);
+      lanesOf(week).keys[0].dispatch("input", { target: { value: String(nowS - 19) } }); // 0.5 s past its end
+      await wait(100);
+      assert.equal(source.recentAsked.length, 1);
+      lanesOf(week).keys[0].dispatch("input", { target: { value: String(nowS - 18) } }); // 1.5 s past
+      await wait(100);
+      assert.equal(source.recentAsked.length, 2);
+      week._current.get("gV").pause();
+    } finally {
+      restore();
+    }
+  });
+});
+
+test("a copy with no usable end time is taken to run to now", async () => {
+  for (const end of [undefined, "start-5", "x"]) {
+    await withStillClock(async () => {
+      const { week, restore, videos } = await scrubbedIntoRecent(({ asked }) => ({ start: asked - 2, end: end === "start-5" ? asked - 7 : end }));
+      try {
+        assert.ok(videos[0].src.startsWith("blob:"), String(end));
+        await wait(100);
+        assert.ok(!texts(week).includes(WAITING));
+      } finally {
+        restore();
+        week._current.get("gV").pause();
+      }
+    });
+  }
+});
+
+test("a copy fetched while Protect's footage is on show loads out of sight, the still shows meanwhile, and it comes forward on the frame wanted", async () => {
+  await withStillClock(async () => {
+    let open;
+    const gate = new Promise((resolve) => (open = resolve));
+    const source = withRecent(withScrub(withClips(withDetail(fakeSource(), visitDetail()))));
+    const restore = answerRecent(async ({ asked }) => {
+      await gate;
+      return { start: asked - 2, end: Math.floor(Date.now() / 1000) };
+    });
+    try {
+      const week = await openVisit(source);
+      await settle();
+      const front = lanesOf(week).videos[0];
+      front.readyState = 4;
+      front.dispatch("loadedmetadata");
+      front.dispatch("loadeddata"); // the footage is on show
+      const nowS = nowSeconds();
+      lanesOf(week).keys[0].dispatch("input", { target: { value: String(nowS - 20) } });
+      await wait(250);
+      assert.equal(allByClass(week, "img", "s-still")[0].src, `/frame/cam-side/${nowS - 20}.jpg`);
+      assert.ok(!texts(week).includes(WAITING));
+      let plays = 0;
+      front.play = () => (plays++, Promise.resolve());
+      lanesOf(week).btns[0].dispatch("click"); // Play while the copy is on its way
+      assert.equal(plays, 0); // not the old minute's footage meanwhile
+      open();
+      await wait(100);
+      const standby = lanesOf(week).standbys[0];
+      assert.ok(standby.src.startsWith("blob:"));
+      standby.dispatch("ended"); // only the video on show ending counts
+      await wait(100);
+      assert.equal(timeOf(week, 0), nowS - 20);
+      assert.equal(lanesOf(week).videos[0], front); // not before it shows the frame
+      forward(week, 0);
+      await wait(50);
+      assert.equal(lanesOf(week).videos[0], standby);
+      assert.equal(standby.currentTime, 2);
+      assert.ok(!texts(week).includes(WAITING));
+      week._current.get("gV").pause();
+    } finally {
+      restore();
+    }
+  });
+});
+
+test("a next copy that won't play is let go quietly while the first goes on", async () => {
+  await withStillClock(async (advance) => {
+    const { source, week, restore, videos, btns } = await scrubbedIntoRecent(({ asked }) => ({ start: asked - 2, end: Math.floor(Date.now() / 1000) }));
+    try {
+      const front = videos[0];
+      front.play = () => Promise.resolve();
+      clipLoaded(front);
+      btns[0].dispatch("click");
+      advance(10000);
+      front.currentTime = 19.5;
+      await wait(150);
+      assert.equal(source.recentAsked.length, 2);
+      lanesOf(week).standbys[0].dispatch("error");
+      await wait(100);
+      assert.ok(!texts(week).includes(WAITING));
+      assert.equal(lanesOf(week).videos[0], front);
+      let plays = 0;
+      front.play = () => (plays++, Promise.resolve());
+      btns[0].dispatch("click"); // Pause
+      btns[0].dispatch("click"); // and Play: the copy on show plays on
+      assert.equal(plays, 1);
+    } finally {
+      restore();
+      week._current.get("gV").pause();
+    }
+  });
+});
+
+test("a next copy that is ready is swapped in when the owner seeks past the end of the one on show", async () => {
+  await withStillClock(async (advance) => {
+    const { source, week, nowS, restore, videos, btns } = await scrubbedIntoRecent(({ asked }) => ({ start: asked - 2, end: Math.floor(Date.now() / 1000) }));
+    try {
+      const front = videos[0];
+      front.play = () => Promise.resolve();
+      clipLoaded(front);
+      btns[0].dispatch("click");
+      advance(10000); // now is nowS + 10; the first copy ends at nowS
+      front.currentTime = 19.5;
+      await wait(150);
+      const standby = lanesOf(week).standbys[0];
+      standby.readyState = 4;
+      standby.dispatch("loadeddata"); // ready, held back
+      btns[0].dispatch("click"); // Pause
+      lanesOf(week).keys[0].dispatch("input", { target: { value: String(nowS + 4) } }); // in the next copy only
+      await wait(50);
+      assert.equal(standby.currentTime, 6); // it began at nowS - 2
+      standby.dispatch("seeked");
+      await wait(50);
+      assert.equal(lanesOf(week).videos[0], standby);
+      assert.equal(source.recentAsked.length, 2);
+      assert.ok(!texts(week).includes(WAITING));
+    } finally {
+      restore();
+      week._current.get("gV").pause();
+    }
+  });
+});
+
+test("Protect's footage taking over frees the copy's object URL, and the video is reused without leaking it", async () => {
+  await withStillClock(async (advance) => {
+    const blobs = trackBlobs();
+    const { source, week, nowS, restore, videos, btns } = await scrubbedIntoRecent();
+    try {
+      clipLoaded(videos[0]);
+      btns[0].dispatch("click");
+      advance(80000); // the minute is whole: its footage loads out of sight
+      await wait(150);
+      forward(week, 0); // and comes forward; the copy's video is the standby now
+      await wait(50);
+      assert.deepEqual(blobs.revoked, []); // still held by the standby
+      // Another whole minute: the standby loads it, which lets the copy go.
+      lanesOf(week).keys[0].dispatch("input", { target: { value: String(nowS - 3600) } });
+      await wait(100);
+      assert.deepEqual(blobs.revoked, blobs.made);
+      forward(week, 0); // the minute's footage comes forward, on the copy's old video
+      await wait(50);
+      assert.equal(lanesOf(week).videos[0].currentTime, (nowS - 3600) % 60); // sought in the minute, not the copy
+    } finally {
+      restore();
+      blobs.restore();
+      week._current.get("gV").pause();
+    }
+  });
+});
+
+// A 425 from Protect's footage on a lane the owner scrubbed (the minute is whole by this clock,
+// not by the engine's), then the engine's copy answered as `answer` says.
+async function into425(answer) {
+  const real = globalThis.fetch;
+  globalThis.fetch = (url, options) => (String(url).startsWith("/footage/") ? Promise.resolve({ status: 425 }) : real(url, options));
+  const restoreRecent = answerRecent(answer);
+  const source = withRecent(withScrub(withClips(withDetail(fakeSource(), visitDetail()))));
+  const week = await openVisit(source);
+  dragBy(week, 100, 25, 0);
+  await settle();
+  lanesOf(week).videos[0].src = "/footage/x";
+  lanesOf(week).videos[0].dispatch("error");
+  await wait(100);
+  const footage = () => source.footageAsked.filter(([camera]) => camera === "cam-side").length;
+  return {
+    source,
+    week,
+    footage,
+    restore() {
+      restoreRecent();
+      globalThis.fetch = real;
+    },
+  };
+}
+
+test("after a 425 and no copy, the minute is waited for, not asked of the footage again", async () => {
+  await withStillClock(async () => {
+    const { week, footage, restore } = await into425(() => ({ status: 404 }));
+    try {
+      assert.ok(texts(week).includes(WAITING));
+      const asked = footage();
+      lanesOf(week).btns[0].dispatch("click"); // another look
+      await wait(150);
+      assert.equal(footage(), asked);
+      assert.ok(texts(week).includes(WAITING));
+      week._current.get("gV").pause();
+    } finally {
+      restore();
+    }
+  });
+});
+
+test("after a 425, with the copy on its way, a redraw doesn't ask the footage again", async () => {
+  await withStillClock(async () => {
+    let open;
+    const gate = new Promise((resolve) => (open = resolve));
+    const { week, source, footage, restore } = await into425(async ({ asked }) => {
+      await gate;
+      return { start: asked - 2, end: asked + 60 };
+    });
+    try {
+      const asked = footage();
+      lanesOf(week).btns[0].dispatch("click");
+      await wait(150);
+      assert.equal(footage(), asked);
+      open();
+      await wait(100);
+      assert.equal(source.recentAsked.length, 1);
+      assert.ok(lanesOf(week).videos[0].src.startsWith("blob:"));
+      week._current.get("gV").pause();
+    } finally {
+      restore();
+    }
+  });
+});
+
+test("a copy answered with an error status is not used, whatever times it carries", async () => {
+  await withStillClock(async () => {
+    const { week, restore } = await scrubbedIntoRecent(({ asked }) => ({ status: 500, start: asked - 2, end: asked + 20 }));
+    try {
+      await wait(150);
+      assert.ok(texts(week).includes(WAITING));
+      assert.equal(lanesOf(week).videos[0].src || "", "");
+    } finally {
+      restore();
+      week._current.get("gV").pause();
+    }
+  });
+});
+
+test("an ask let go by going Live doesn't stop the next scrub from asking", async () => {
+  await withStillClock(async () => {
+    let n = 0;
+    const { source, week, nowS, restore, videos } = await scrubbedIntoRecent(async ({ asked }) => {
+      if (n++ === 0) await new Promise(() => {}); // the first never answers
+      return { start: asked - 2, end: Math.floor(Date.now() / 1000) };
+    });
+    try {
+      withClass(week, "button", "s-golive").dispatch("click"); // aborts it
+      await settle();
+      lanesOf(week).keys[0].dispatch("input", { target: { value: String(nowS - 20) } });
+      await wait(150);
+      assert.equal(source.recentAsked.length, 2);
+      assert.ok(lanesOf(week).videos[0].src.startsWith("blob:"));
+    } finally {
+      restore();
+      week._current.get("gV").pause();
+    }
+  });
+});
+
+test("scrubbing back into a copy held clears the waiting note a failed ask left", async () => {
+  await withStillClock(async () => {
+    const { week, nowS, restore, videos } = await scrubbedIntoRecent(({ asked }) => (asked === Math.floor(Date.now() / 1000) - 20 ? { start: asked - 2, end: asked + 10 } : { status: 404 }));
+    try {
+      clipLoaded(videos[0]);
+      lanesOf(week).keys[0].dispatch("input", { target: { value: String(nowS - 6) } }); // past the copy: not there
+      await wait(100);
+      assert.ok(texts(week).includes(WAITING));
+      lanesOf(week).keys[0].dispatch("input", { target: { value: String(nowS - 20) } }); // back inside it
+      await wait(50);
+      assert.ok(!texts(week).includes(WAITING));
+      assert.equal(lanesOf(week).videos[0].currentTime, 2);
+    } finally {
+      restore();
+      week._current.get("gV").pause();
+    }
+  });
+});
+
+test("a drag at rest asks only after it has been still; a copy fetched for what the picture showed doesn't hide the still", async () => {
+  await withStillClock(async () => {
+    const source = freshScrub();
+    const restore = answerRecent(({ asked }) => ({ start: asked - 2, end: Math.floor(Date.now() / 1000) }));
+    try {
+      const week = await openVisit(source);
+      await settle();
+      const { pics } = lanesOf(week);
+      pdown(pics[0], 100, 0);
+      pmove(pics[0], 125, 10);
+      await wait(100);
+      pmove(pics[0], 150, 20);
+      await wait(100);
+      pmove(pics[0], 175, 30);
+      await wait(100); // 300 ms since the first move, 100 since the last
+      assert.equal(source.recentAsked.length, 0);
+      await wait(300);
+      assert.equal(source.recentAsked.length, 1);
+      pup(pics[0], 175, 3000);
+      week._current.get("gV").pause();
+    } finally {
+      restore();
+    }
+  });
+});
+
+test("while a drag waits to rest the still of the moment shows over the footage it left, and a note from before goes", async () => {
+  await withStillClock(async () => {
+    const source = freshScrub();
+    const restore = answerRecent(({ asked }) => ({ start: asked - 2, end: Math.floor(Date.now() / 1000) }));
+    try {
+      const week = await openVisit(source);
+      await settle();
+      const nowS = nowSeconds();
+      lanesOf(week).keys[0].dispatch("input", { target: { value: String(nowS - 180) } }); // a whole minute: footage
+      await wait(60);
+      const front = lanesOf(week).videos[0];
+      front.readyState = 4;
+      front.dispatch("loadedmetadata");
+      front.dispatch("loadeddata");
+      const { pics } = lanesOf(week);
+      pdown(pics[0], 300, 0);
+      pmove(pics[0], 50, 10); // 100 s forward: into the minute being recorded
+      await wait(200);
+      assert.equal(source.recentAsked.length, 0);
+      assert.equal(allByClass(week, "img", "s-still")[0].src, `/frame/cam-side/${nowS - 80}.jpg`);
+      pup(pics[0], 50, 3000);
+      await wait(100);
+      assert.equal(source.recentAsked.length, 1);
+      week._current.get("gV").pause();
+    } finally {
+      restore();
+    }
+  });
+  await withStillClock(async () => {
+    const { week, restore } = await scrubbedIntoRecent(() => ({ status: 404 }));
+    try {
+      await wait(100);
+      assert.ok(texts(week).includes(WAITING));
+      const { pics } = lanesOf(week);
+      pdown(pics[0], 100, 0);
+      pmove(pics[0], 125, 10);
+      await wait(50);
+      assert.ok(!texts(week).includes(WAITING)); // it will be asked for when the drag rests
+      pup(pics[0], 125, 3000);
+    } finally {
+      restore();
+      week._current.get("gV").pause();
+    }
+  });
+});
+
+test("a copy ending after the owner jumped elsewhere doesn't pull the camera back", async () => {
+  await withStillClock(async () => {
+    const { week, nowS, restore, videos, btns } = await scrubbedIntoRecent();
+    try {
+      clipLoaded(videos[0]);
+      btns[0].dispatch("click");
+      lanesOf(week).keys[0].dispatch("input", { target: { value: String(Math.floor(nowS) - 3600) } });
+      await wait(100);
+      videos[0].dispatch("ended"); // the old picture finishes while the new minute loads
+      await wait(100);
+      assert.equal(timeOf(week, 0), Math.floor(nowS) - 3600);
+    } finally {
+      restore();
+      week._current.get("gV").pause();
+    }
+  });
+});
+
+test("a next copy that doesn't run on from the one playing is not used", async () => {
+  await withStillClock(async (advance) => {
+    const blobs = trackBlobs();
+    const same = Math.floor(Date.now() / 1000) - 10;
+    const { source, week, restore, videos, btns } = await scrubbedIntoRecent(({ asked }) => ({ start: asked - 2, end: same })); // the same end every time
+    try {
+      const front = videos[0];
+      front.play = () => Promise.resolve();
+      clipLoaded(front);
+      btns[0].dispatch("click");
+      advance(10000);
+      front.currentTime = 10; // 2 s of a 12 s copy to go
+      await wait(150);
+      assert.equal(source.recentAsked.length, 2);
+      assert.equal(lanesOf(week).standbys[0].src || "", ""); // refused
+      assert.equal(blobs.made.length, 2);
+      assert.deepEqual(blobs.revoked, [blobs.made[1]]);
+    } finally {
+      restore();
+      blobs.restore();
+      week._current.get("gV").pause();
+    }
+  });
+});
+
+test("a next copy that lands after the owner moved on leaves what is loading there alone", async () => {
+  await withStillClock(async (advance) => {
+    let open;
+    const gate = new Promise((resolve) => (open = resolve));
+    let n = 0;
+    const { source, week, nowS, restore, videos, btns } = await scrubbedIntoRecent(async ({ asked }) => {
+      if (n++ > 0) await gate;
+      return { start: asked - 2, end: Math.floor(Date.now() / 1000) };
+    });
+    try {
+      const front = videos[0];
+      front.play = () => Promise.resolve();
+      clipLoaded(front);
+      btns[0].dispatch("click");
+      advance(10000);
+      front.currentTime = 19.5;
+      await wait(150);
+      assert.equal(source.recentAsked.length, 2); // on its way
+      lanesOf(week).keys[0].dispatch("input", { target: { value: String(Math.floor(nowS) - 3600) } }); // an hour back
+      await wait(100);
+      open();
+      await wait(100);
+      assert.ok(lanesOf(week).standbys[0].src.startsWith("/footage/"), lanesOf(week).standbys[0].src);
+    } finally {
+      restore();
+      week._current.get("gV").pause();
+    }
+  });
+});
+
+test("a wanted next copy still on its way is let go when the owner seeks past the end of the one on show", async () => {
+  await withStillClock(async (advance) => {
+    let open;
+    const gate = new Promise((resolve) => (open = resolve));
+    let n = 0;
+    const { source, week, nowS, restore, videos, btns } = await scrubbedIntoRecent(async ({ asked }) => {
+      if (n++ > 0) await gate;
+      return { start: asked - 2, end: Math.floor(Date.now() / 1000) };
+    });
+    try {
+      const front = videos[0];
+      front.play = () => Promise.resolve();
+      clipLoaded(front);
+      btns[0].dispatch("click");
+      advance(10000);
+      front.currentTime = 19.5;
+      await wait(150);
+      assert.equal(source.recentAsked.length, 2);
+      btns[0].dispatch("click"); // Pause
+      lanesOf(week).keys[0].dispatch("input", { target: { value: String(Math.floor(nowS) + 4) } }); // beyond the copy on show
+      await wait(100);
+      assert.equal(source.recentAsked.length, 3); // asked for where the owner is, not waited for
+      assert.equal(recentSignals.at(-2).aborted, true);
+      open();
+    } finally {
+      restore();
+      week._current.get("gV").pause();
+    }
+  });
+});
+
+test("the owner returning to a held copy's own video isn't sought again and again while it waits", async () => {
+  await withStillClock(async (advance) => {
+    const { week, restore, videos, btns } = await scrubbedIntoRecent(({ asked }) => ({ start: asked - 2, end: Math.floor(Date.now() / 1000) }));
+    try {
+      const front = videos[0];
+      front.play = () => Promise.resolve();
+      clipLoaded(front);
+      let seeks = 0;
+      let at = front.currentTime;
+      Object.defineProperty(front, "currentTime", { get: () => at, set: (v) => ((at = v), seeks++) });
+      btns[0].dispatch("click");
+      await wait(250); // frames draw
+      assert.equal(seeks, 0);
+    } finally {
+      restore();
+      week._current.get("gV").pause();
+    }
+  });
+});
+
+test("a next copy that isn't loaded yet waits for its frame, even in a video that held a loaded copy before", async () => {
+  await withStillClock(async (advance) => {
+    const { source, week, restore, videos, btns } = await scrubbedIntoRecent(({ asked }) => ({ start: asked - 2, end: Math.floor(Date.now() / 1000) }));
+    try {
+      const front = videos[0];
+      front.play = () => Promise.resolve();
+      clipLoaded(front);
+      btns[0].dispatch("click");
+      advance(10000);
+      front.currentTime = 19.5;
+      await wait(150);
+      const second = lanesOf(week).standbys[0];
+      second.readyState = 4;
+      second.dispatch("loadeddata");
+      front.dispatch("ended");
+      await wait(100);
+      second.dispatch("seeked");
+      await wait(50);
+      assert.equal(lanesOf(week).videos[0], second); // the second copy is on show; the first's video is the standby
+      advance(10000);
+      second.currentTime = 9.5; // near the end of a copy that began 2 s before nowS
+      await wait(150);
+      assert.equal(source.recentAsked.length, 3);
+      const first = lanesOf(week).standbys[0];
+      assert.equal(first, front);
+      assert.ok(first.src.startsWith("blob:")); // the third copy, not yet loaded
+      second.dispatch("ended");
+      await wait(450); // longer than a swap takes
+      assert.equal(lanesOf(week).videos[0], second); // not swapped for a copy that hasn't loaded
+      first.readyState = 4;
+      first.dispatch("loadeddata");
+      await wait(100);
+      first.dispatch("seeked");
+      await wait(50);
+      assert.equal(lanesOf(week).videos[0], first);
+    } finally {
+      restore();
+      week._current.get("gV").pause();
+    }
+  });
+});
+
+test("a next copy that runs on only a little from the one playing is not used either", async () => {
+  await withStillClock(async (advance) => {
+    const same = Math.floor(Date.now() / 1000) - 10;
+    let n = 0;
+    const { source, week, restore, videos, btns } = await scrubbedIntoRecent(({ asked }) => ({ start: asked - 2, end: n++ === 0 ? same : same + 0.3 }));
+    try {
+      const front = videos[0];
+      front.play = () => Promise.resolve();
+      clipLoaded(front);
+      btns[0].dispatch("click");
+      advance(10000);
+      front.currentTime = 10;
+      await wait(150);
+      assert.equal(source.recentAsked.length, 2);
+      assert.equal(lanesOf(week).standbys[0].src || "", "");
+    } finally {
+      restore();
+      week._current.get("gV").pause();
+    }
+  });
+});
+
+test("a redraw while the engine's answer on a minute is awaited lets another whole minute go to the footage", async () => {
+  await withStillClock(async () => {
+    let open;
+    const gate = new Promise((resolve) => (open = resolve));
+    const { week, source, restore } = await into425(async ({ asked }) => {
+      await gate;
+      return { start: asked - 2, end: asked + 60 };
+    });
+    try {
+      const t = source.recentAsked[0][1];
+      lanesOf(week).keys[0].dispatch("input", { target: { value: String(t + 120) } }); // two minutes on, whole by the clock and the engine
+      await wait(100);
+      assert.ok(source.footageAsked.some(([camera, m]) => camera === "cam-side" && m === minuteOf(t + 120)));
+      open();
+    } finally {
+      restore();
+      week._current.get("gV").pause();
+    }
+  });
+});
+
+test("a second copy asked for in the same minute the engine said wasn't whole carries that on", async () => {
+  await withStillClock(async (advance) => {
+    const { week, source, footage, restore } = await into425(({ asked }) => ({ start: asked - 2, end: asked + 60 }));
+    try {
+      const t = source.recentAsked[0][1];
+      clipLoaded(lanesOf(week).videos[0]);
+      advance(30000);
+      lanesOf(week).keys[0].dispatch("input", { target: { value: String(t - 4) } }); // before the first copy began: asked again
+      await wait(100);
+      assert.equal(source.recentAsked.length, 2);
+      advance(20000); // the first copy's word has run out; the second's has not
+      const before = footage();
+      lanesOf(week).btns[0].dispatch("click");
+      await wait(100);
+      assert.equal(footage(), before);
+      assert.ok(!texts(week).includes(WAITING));
+    } finally {
+      restore();
+      week._current.get("gV").pause();
+    }
+  });
+});
+
+test("an ask on its way is replaced when the owner goes even a second before the moment it began at", async () => {
+  await withStillClock(async () => {
+    let open;
+    const gate = new Promise((resolve) => (open = resolve));
+    const { source, week, nowS, restore } = await scrubbedIntoRecent(async ({ asked }) => {
+      await gate;
+      return { start: asked - 2, end: Math.floor(Date.now() / 1000) };
+    });
+    try {
+      const first = recentSignals.at(-1);
+      lanesOf(week).keys[0].dispatch("input", { target: { value: String(Math.floor(nowS) - 21) } }); // 1 s before the 20 s it began at
+      await wait(100);
+      assert.equal(source.recentAsked.length, 2);
+      assert.equal(first.aborted, true);
+      open();
+    } finally {
+      restore();
+      week._current.get("gV").pause();
     }
   });
 });
