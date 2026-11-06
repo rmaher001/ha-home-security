@@ -3064,6 +3064,7 @@ test("a newer version keeps a camera scrubbed back from Live where it was", asyn
     await settle();
     const nowS = Date.now() / 1000;
     dragBy(week, 100, 25, 0);
+    lanesOf(week).btns[0].dispatch("click"); // Pause: a recording playing holds a newer version back
     await settle();
     const newer = recentDetail();
     newer.visit.headline = "NEWER VERSION HEADLINE";
@@ -3193,10 +3194,10 @@ test("a scrub to a minute Protect hasn't finished shows its still and says so, a
       assert.ok(!source.footageAsked.some(([camera]) => camera === "cam-side")); // not asked for yet
       assert.equal(allByClass(week, "img", "s-still")[0].src, `/frame/cam-side/${nowS - 10}.jpg`);
       assert.ok(again.length > 0); // and asked again in 10 s
-      // Play waits for the minute; it doesn't go Live.
+      // Playing on after the scrub (Live was going) waits for the minute; it doesn't go Live.
+      assert.equal(btns[0].getAttribute("aria-label"), "Pause Sidewalk");
       const plays = [];
       for (const v of [...lanesOf(week).videos, ...lanesOf(week).standbys]) v.play = () => (plays.push(v), Promise.resolve());
-      btns[0].dispatch("click");
       await wait(150);
       assert.notEqual(clocks[0].textContent, "Live");
       assert.equal(timeOf(week, 0), nowS - 10);
@@ -3714,7 +3715,7 @@ test("today's clip has a small play button and a sound button, no browser contro
   assert.equal(sound.getAttribute("aria-pressed"), "true");
 });
 
-test("a drag pauses the camera being dragged", async () => {
+test("a drag pauses a playing camera while it moves, and plays it again when let go", async () => {
   const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
   const week = await openVisit(source);
   const { pics, btns, videos } = lanesOf(week);
@@ -3724,9 +3725,153 @@ test("a drag pauses the camera being dragged", async () => {
   paused = 0;
   pdown(pics[0], 300, 0);
   pmove(pics[0], 250, 1000);
-  pup(pics[0], 250, 2000);
   assert.ok(paused > 0);
+  assert.equal(btns[0].getAttribute("aria-label"), "Play Sidewalk"); // paused while it moves
+  pup(pics[0], 250, 2000);
+  assert.equal(btns[0].getAttribute("aria-label"), "Pause Sidewalk"); // playing again
+  week._current.get("gV").pause();
+});
+
+test("a playing camera dragged as the row goes to sleep doesn't play when let go", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  const { pics, btns } = lanesOf(week);
+  btns[0].dispatch("click");
+  pdown(pics[0], 300, 0);
+  pmove(pics[0], 250, 1000);
+  week._current.get("gV").pause(); // the row sleeps mid-drag
+  pup(pics[0], 250, 2000);
   assert.equal(btns[0].getAttribute("aria-label"), "Play Sidewalk");
+});
+
+test("two fingers dragging at once: each camera that was playing plays on once both let go", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  const { pics, btns } = lanesOf(week);
+  withClass(week, "button", "s-all").dispatch("click");
+  pdown(pics[0], 300, 0);
+  pmove(pics[0], 250, 1000);
+  pdown(pics[1], 300, 1100);
+  pmove(pics[1], 250, 1200);
+  pup(pics[0], 250, 2000);
+  assert.deepEqual(btns.map((b) => b.getAttribute("aria-label")), ["Play Sidewalk", "Play Garage"]); // one finger still down
+  pup(pics[1], 250, 2100);
+  assert.deepEqual(btns.map((b) => b.getAttribute("aria-label")), ["Pause Sidewalk", "Pause Garage"]);
+  week._current.get("gV").pause();
+});
+
+test("Play all says Play all again once each camera is paused by hand, and one tap plays them", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  const { btns } = lanesOf(week);
+  const all = withClass(week, "button", "s-all");
+  all.dispatch("click");
+  for (const b of btns) b.dispatch("click"); // each paused by hand
+  assert.equal(all.textContent, "Play all");
+  all.dispatch("click");
+  assert.deepEqual(btns.map((b) => b.getAttribute("aria-label")), ["Pause Sidewalk", "Pause Garage"]);
+  week._current.get("gV").pause();
+});
+
+test("a tap that stops a playing camera's glide plays it on from there", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  const { pics, btns } = lanesOf(week);
+  btns[0].dispatch("click");
+  pdown(pics[0], 300, 0);
+  pmove(pics[0], 250, 10);
+  pmove(pics[0], 200, 20);
+  pup(pics[0], 200, 30); // it glides
+  await wait(60);
+  pdown(pics[0], 200, 100); // caught
+  assert.equal(btns[0].getAttribute("aria-label"), "Pause Sidewalk");
+  pup(pics[0], 200, 110);
+  week._current.get("gV").pause();
+});
+
+test("a cancel that lands mid-glide plays the camera on", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  const { pics, btns } = lanesOf(week);
+  btns[0].dispatch("click");
+  pdown(pics[0], 300, 0);
+  pmove(pics[0], 250, 10);
+  pmove(pics[0], 200, 20);
+  pup(pics[0], 200, 30); // it glides
+  await wait(60);
+  pics[0].dispatch("pointercancel", {});
+  assert.equal(btns[0].getAttribute("aria-label"), "Pause Sidewalk");
+  week._current.get("gV").pause();
+});
+
+test("a paused camera stays paused after a drag", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  const { pics, btns } = lanesOf(week);
+  pdown(pics[0], 300, 0);
+  pmove(pics[0], 250, 1000);
+  pup(pics[0], 250, 2000);
+  assert.equal(btns[0].getAttribute("aria-label"), "Play Sidewalk");
+  week._current.get("gV").pause();
+});
+
+test("a cancelled drag of a playing camera plays it again", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  const { pics, btns } = lanesOf(week);
+  btns[0].dispatch("click");
+  pdown(pics[0], 300, 0);
+  pmove(pics[0], 250, 1000);
+  pics[0].dispatch("pointercancel", {});
+  assert.equal(btns[0].getAttribute("aria-label"), "Pause Sidewalk");
+  week._current.get("gV").pause();
+});
+
+test("a flick on a playing camera plays it again once the glide stops, not before", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  const { pics, btns } = lanesOf(week);
+  btns[0].dispatch("click");
+  pdown(pics[0], 300, 0);
+  pmove(pics[0], 290, 10);
+  pmove(pics[0], 280, 20);
+  pup(pics[0], 280, 30); // let go in motion: it glides
+  assert.equal(btns[0].getAttribute("aria-label"), "Play Sidewalk"); // still gliding
+  await wait(1700);
+  assert.equal(btns[0].getAttribute("aria-label"), "Pause Sidewalk");
+  week._current.get("gV").pause();
+});
+
+test("in sync, a drag while every camera plays leaves every camera playing", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  const { pics, btns } = lanesOf(week);
+  withClass(week, "button", "s-sync").dispatch("click");
+  const all = withClass(week, "button", "s-all");
+  all.dispatch("click");
+  pdown(pics[0], 300, 0);
+  pmove(pics[0], 250, 1000);
+  assert.equal(all.textContent, "Play all");
+  pup(pics[0], 250, 2000);
+  assert.deepEqual(btns.map((b) => b.getAttribute("aria-label")), ["Pause Sidewalk", "Pause Garage"]);
+  assert.equal(all.textContent, "Pause");
+  week._current.get("gV").pause();
+});
+
+test("Play all is on the bar without Keep in sync, and turning sync off keeps them playing", async () => {
+  const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
+  const week = await openVisit(source);
+  const { btns } = lanesOf(week);
+  assert.equal(allByClass(week, "button", "s-all").length, 1, "shown before Keep in sync or Line up");
+  const all = withClass(week, "button", "s-all");
+  all.dispatch("click");
+  assert.deepEqual(btns.map((b) => b.getAttribute("aria-label")), ["Pause Sidewalk", "Pause Garage"]);
+  assert.equal(all.textContent, "Pause");
+  const sync = withClass(week, "button", "s-sync");
+  sync.dispatch("click");
+  sync.dispatch("click"); // sync off again
+  assert.deepEqual(btns.map((b) => b.getAttribute("aria-label")), ["Pause Sidewalk", "Pause Garage"]);
+  assert.equal(allByClass(week, "button", "s-all").length, 1);
   week._current.get("gV").pause();
 });
 
@@ -5083,7 +5228,7 @@ test("in sync, Live on the bar takes every camera Live, three streams at most", 
   week._current.get("gV").pause();
 });
 
-test("the bar's Live button goes while the cameras are Live, and comes back beside Play all", async () => {
+test("the bar's Live button goes while the cameras are Live, and comes back", async () => {
   const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
   const week = await openVisit(source);
   withClass(week, "button", "s-sync").dispatch("click");
@@ -5091,8 +5236,9 @@ test("the bar's Live button goes while the cameras are Live, and comes back besi
   await settle();
   assert.equal(allByClass(week, "button", "s-all-live").length, 0);
   lanesOf(week).keys[0].dispatch("input", { target: { value: String(Math.floor(Date.now() / 1000) - 3600) } });
+  assert.equal(allByClass(week, "button", "s-all-live").length, 1); // back, under the shared clock
   const row = withClass(week, "button", "s-all").parentNode;
-  assert.deepEqual(row.childNodes.map((n) => n.getAttribute("class")), ["s-all-live", "s-all"]);
+  assert.deepEqual(row.childNodes.map((n) => n.getAttribute("class")), ["s-sync", "s-line", "s-all"]); // Play all stays on the bar
   week._current.get("gV").pause();
 });
 
@@ -5571,7 +5717,8 @@ async function scrubbedIntoRecent(answer) {
   const week = await openVisit(source);
   await settle();
   const nowS = Date.now() / 1000;
-  dragBy(week, 100, 50, 0); // 50 px: 20 s back
+  dragBy(week, 100, 50, 0); // 50 px: 20 s back; Live was going, so it plays on from there
+  lanesOf(week).btns[0].dispatch("click"); // Pause, so each test starts it when it means to
   await wait(100);
   return { source, week, nowS, restore, ...lanesOf(week) };
 }

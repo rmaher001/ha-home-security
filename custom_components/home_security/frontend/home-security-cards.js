@@ -809,13 +809,13 @@ const setText = (node, text) => {
 function scrubView(source, alertAt, barSlot) {
   const lanes = [];
   const ticks = new Map(); // a camera -> {asked: Map(block start -> {at, ok}), list, version, redraw}
-  const ctl = { sync: false, last: null, playAll: false, timer: null, vel: 0, glider: null, held: 0, paused: true, disposed: false, active: 0, idleTimer: null, onIdle: null, focus: null, refocus: null, heard: null };
+  const ctl = { sync: false, last: null, timer: null, vel: 0, glider: null, held: 0, paused: true, disposed: false, active: 0, idleTimer: null, onIdle: null, focus: null, refocus: null, heard: null, playOn: null };
   const live = new Set(); // the lanes with a Live stream open
   const now = () => Date.now() / 1000;
   let observer = null;
 
-  // The bar: Keep in sync, Line up at the alert (when it alerted), and in sync the shared
-  // clock and Play all.
+  // The bar: Keep in sync, Line up at the alert (when it alerted), Play all, and in sync the
+  // shared clock and Live.
   const thumb = el("span", { class: "s-thumb" });
   const syncButton = el("button", { class: "s-sync", type: "button", "aria-pressed": "false" }, el("span", { class: "s-track" }, thumb), el("span", {}, "Keep in sync"));
   const lineUp = alertAt === null ? null : el("button", { class: "s-line", type: "button" }, "Line up at the alert");
@@ -826,7 +826,7 @@ function scrubView(source, alertAt, barSlot) {
   const playAllWord = el("span", {}, "Play all");
   const playAll = el("button", { class: "s-all", type: "button", "aria-label": "Play every camera together" }, playAllWord);
   const allLive = el("button", { class: "s-all-live", type: "button", "aria-label": "Take every camera Live" }, "Live");
-  const sharedButtons = el("div", { class: "s-row" }, allLive, playAll);
+  const sharedButtons = el("div", { class: "s-row" }, allLive);
   const shared = el("div", { class: "s-shared" }, el("div", {}, sharedWhen, sharedRel, sharedTime), sharedButtons);
   allLive.addEventListener("click", () => {
     const lane = ctl.last ?? lanes[0];
@@ -846,13 +846,16 @@ function scrubView(source, alertAt, barSlot) {
     touch();
     move(lane, t, false); // in sync: every camera
   });
-  const row = el("div", { class: "s-row" }, syncButton, lineUp);
+  const row = el("div", { class: "s-row" }, syncButton, lineUp, playAll);
   const bar = el("div", { class: "s-bar" }, row);
 
   const drawBar = () => {
     syncButton.setAttribute("aria-pressed", ctl.sync ? "true" : "false");
     bar.setAttribute("class", ctl.sync ? "s-bar s-on" : "s-bar");
     show(shared, bar, ctl.sync);
+    const going = lanes.some((l) => l.going()); // Live cameras go by themselves
+    setText(playAllWord, going ? "Pause" : "Play all");
+    playAll.setAttribute("aria-label", going ? "Pause every camera" : "Play every camera together");
     const lane = ctl.last ?? lanes[0];
     if (!ctl.sync || !lane) return;
     const liveNow = lane.live && !lane.frozen; // a paused Live camera holds a moment
@@ -861,11 +864,7 @@ function scrubView(source, alertAt, barSlot) {
     sharedClock.setAttribute("class", liveNow ? "s-big s-red" : "s-big");
     const rel = liveNow ? "every camera, now" : lane.frozen ? "Paused" : alertAt === null ? "" : relWords(lane.t, alertAt, "the moment the guard alerted").replace(/ (before|after)$/, " $1 the alert");
     setText(sharedRel, rel);
-    const going = ctl.playAll || lanes.some((l) => l.going()); // Live cameras go by themselves
-    setText(playAllWord, going ? "Pause" : "Play all");
-    if (liveNow) allLive.remove(); // already Live: no need
-    else if (allLive.parentNode !== sharedButtons) sharedButtons.replaceChildren(allLive, playAll);
-    playAll.setAttribute("aria-label", going ? "Pause every camera" : "Play every camera together");
+    show(allLive, sharedButtons, !liveNow); // already Live: no need
   };
 
   // The owner is doing something: a newer version of the visit waits until 3 s after.
@@ -917,6 +916,16 @@ function scrubView(source, alertAt, barSlot) {
     ctl.vel = 0;
     ctl.glider = null;
     for (const lane of ctl.sync ? lanes : glider ? [glider] : []) lane.draw(false); // the exact frame
+    playOn();
+  }
+  // After a drag (and its glide), the cameras that were playing when it began play on: once
+  // no finger is still dragging.
+  function playOn() {
+    if (ctl.held > 0) return;
+    const was = ctl.playOn;
+    ctl.playOn = null;
+    for (const l of was ?? []) if (lanes.includes(l)) l.play();
+    drawBar();
   }
 
   // Move a camera (and, in sync, all of them) to a moment, never past now. Only a camera
@@ -941,7 +950,6 @@ function scrubView(source, alertAt, barSlot) {
   syncButton.addEventListener("click", () => {
     touch();
     ctl.sync = !ctl.sync;
-    if (!ctl.sync) setPlayAll(false);
     const lane = ctl.last ?? lanes[0];
     if (ctl.sync && lane) move(lane, lane.t, false);
     drawBar();
@@ -959,7 +967,6 @@ function scrubView(source, alertAt, barSlot) {
   }
   // `hold`: Pause was asked for, so a Live camera holds its picture too.
   function setPlayAll(on, hold = false) {
-    ctl.playAll = on;
     ctl.holdingAll = !on && hold; // a slot freed now is for no one: they all pause
     try {
       for (const lane of lanes) (on ? lane.play() : lane.pause(hold));
@@ -970,7 +977,7 @@ function scrubView(source, alertAt, barSlot) {
   }
   playAll.addEventListener("click", () => {
     touch();
-    setPlayAll(!(ctl.playAll || lanes.some((l) => l.going())), true);
+    setPlayAll(!lanes.some((l) => l.going()), true);
   });
 
   // Live streams: at most LIVE_MAX open, cameras on screen first. A camera without one shows
@@ -2018,6 +2025,7 @@ function scrubView(source, alertAt, barSlot) {
       ctl.last = self;
       if (going()) self.pause(true);
       else self.play();
+      drawBar(); // Play all says what a tap on it would do now
     });
     when.addEventListener("click", () => {
       touch();
@@ -2067,12 +2075,13 @@ function scrubView(source, alertAt, barSlot) {
         if (!held.moved && Math.abs(dx) <= SCRUB_TAP_PX) return;
         if (!held.moved) {
           held.moved = true;
-          for (const l of ctl.sync ? lanes : [self]) {
+          const moving = ctl.sync ? lanes : [self];
+          ctl.playOn = [...new Set([...(ctl.playOn ?? []), ...moving.filter((l) => l.going())])]; // with any other finger's
+          for (const l of moving) {
             l.pause();
             if (l.quality === "full") l.quality = "low"; // scrubbing is at low quality
             l.startLapse(-dx); // left is forward in time
           }
-          ctl.playAll = false;
         }
         touch();
         const at = event.timeStamp ?? Date.now();
@@ -2099,15 +2108,18 @@ function scrubView(source, alertAt, barSlot) {
           run();
         } else {
           for (const l of ctl.sync ? lanes : [self]) l.draw(false); // the exact frame
+          playOn();
         }
       });
       area.addEventListener("pointercancel", () => {
         const was = held;
+        const gliding = ctl.glider !== null;
         release();
         for (const l of lanes) l.speed = 0;
         ctl.vel = 0;
         ctl.glider = null;
         if (was) for (const l of ctl.sync ? lanes : [self]) l.draw(false);
+        if (was?.moved || gliding) playOn();
       });
     };
     drag(pic, true);
@@ -2210,7 +2222,7 @@ function scrubView(source, alertAt, barSlot) {
     ctl.paused = true;
     ctl.vel = 0;
     ctl.glider = null;
-    ctl.playAll = false;
+    ctl.playOn = null;
     ctl.held = 0;
     clearTimeout(ctl.idleTimer);
     ctl.idleTimer = null;
