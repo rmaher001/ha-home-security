@@ -117,7 +117,7 @@ test("a story that changes (new `updated`) gets a fresh picture", async () => {
   const week = mount("hs-week", source);
   source.push([story("A", { updated: "2026-10-27T09:20:00Z" })]);
   await settle();
-  week.shadowRoot.querySelectorAll("div").find((d) => d.getAttribute("role") === "button").dispatch("click");
+  week.shadowRoot.all("div").find((d) => d.getAttribute("role") === "button").dispatch("click");
   await settle();
   assert.equal(week.shadowRoot.querySelector("img").src, "/signed/A/2");
   assert.deepEqual(source.asked, ["A", "A"]);
@@ -146,7 +146,7 @@ test("the signed URL is shared between cards for 50 minutes, then asked for agai
   const week = mount("hs-week", source);
   source.push([story("A")]);
   await settle();
-  week.shadowRoot.querySelectorAll("div").find((d) => d.getAttribute("role") === "button").dispatch("click");
+  week.shadowRoot.all("div").find((d) => d.getAttribute("role") === "button").dispatch("click");
   await settle();
   assert.equal(week.shadowRoot.querySelector("img").src, "/signed/A/1");
   assert.deepEqual(source.asked, ["A"]);
@@ -164,7 +164,7 @@ test("the week list keeps an open story's picture across pushes", async () => {
   const week = mount("hs-week", source);
   source.push([story("A"), story("B")]);
   await settle();
-  week.shadowRoot.querySelectorAll("div").find((d) => d.getAttribute("role") === "button").dispatch("click");
+  week.shadowRoot.all("div").find((d) => d.getAttribute("role") === "button").dispatch("click");
   await settle();
   const img = week.shadowRoot.querySelector("img");
   source.push([story("A", { fine: true }), story("B")]);
@@ -265,7 +265,7 @@ function withDetail(source, answer = DETAIL) {
 }
 
 function openFirst(week) {
-  week.shadowRoot.querySelectorAll("div").find((d) => d.getAttribute("role") === "button").dispatch("click");
+  week.shadowRoot.all("div").find((d) => d.getAttribute("role") === "button").dispatch("click");
 }
 
 const texts = (week) => week.shadowRoot.textContent;
@@ -286,7 +286,7 @@ test("an opened story shows the description, each step with the Guard note, and 
   // In order: description, then step one, then step two.
   assert.ok(text.indexOf("grey hoodie") < text.indexOf("a person appears"));
   assert.ok(text.indexOf("a person appears") < text.indexOf("tries the gate"));
-  const srcs = week.shadowRoot.querySelectorAll("img").map((i) => i.src);
+  const srcs = week.shadowRoot.all("img").map((i) => i.src);
   // The story's own picture first, then the steps' pictures in order.
   assert.deepEqual(srcs.slice(1), ["/step/gA/0", "/step/gA/1", "/step/gA/2"]);
   assert.deepEqual(source.stepAsked, [["gA", 0], ["gA", 1], ["gA", 2]]);
@@ -299,11 +299,11 @@ test("the detail is fetched once per story and updated, and a push keeps its pic
   await settle();
   openFirst(week);
   await settle();
-  const imgs = week.shadowRoot.querySelectorAll("img");
+  const imgs = week.shadowRoot.all("img");
   source.push([guardStory("gA", { fine: true })]);
   await settle();
   assert.deepEqual(source.detailAsked, ["gA"]);
-  assert.deepEqual(week.shadowRoot.querySelectorAll("img"), imgs);
+  assert.deepEqual(week.shadowRoot.all("img"), imgs);
   assert.deepEqual(source.stepAsked.length, 3);
 
   // The story changed (a description arrived): fetched again.
@@ -328,7 +328,7 @@ test("a story with no detail renders as before", async () => {
   openFirst(week);
   await settle();
   assert.deepEqual(source.detailAsked, ["A"]);
-  assert.equal(week.shadowRoot.querySelectorAll("img").length, 1);
+  assert.equal(week.shadowRoot.all("img").length, 1);
   assert.ok(!texts(week).includes("Guard"));
   assert.ok(texts(week).includes("Someone at the door."));
 });
@@ -340,7 +340,7 @@ test("a source without detail renders as before", async () => {
   await settle();
   openFirst(week);
   await settle();
-  assert.equal(week.shadowRoot.querySelectorAll("img").length, 1);
+  assert.equal(week.shadowRoot.all("img").length, 1);
   assert.ok(!texts(week).includes("Guard"));
 });
 
@@ -353,7 +353,7 @@ test("a failing detail request renders as before and is not retried in a loop", 
   await settle();
   source.push([guardStory("gA")]);
   await settle();
-  assert.equal(week.shadowRoot.querySelectorAll("img").length, 1);
+  assert.equal(week.shadowRoot.all("img").length, 1);
   assert.deepEqual(source.detailAsked, ["gA"]);
 });
 
@@ -380,7 +380,7 @@ test("a step picture that fails to load is dropped and the rest stay", async () 
   openFirst(week);
   await settle();
   await settle();
-  const srcs = week.shadowRoot.querySelectorAll("img").map((i) => i.src).filter(Boolean);
+  const srcs = week.shadowRoot.all("img").map((i) => i.src).filter(Boolean);
   assert.deepEqual(srcs.slice(1), ["/step/gA/0", "/step/gA/2"]);
 });
 
@@ -445,7 +445,7 @@ test("only guard stories ask for a detail", async () => {
   openFirst(week);
   await settle();
   assert.deepEqual(source.detailAsked, []);
-  assert.equal(week.shadowRoot.querySelectorAll("img").length, 1);
+  assert.equal(week.shadowRoot.all("img").length, 1);
 });
 
 test("a failed detail is tried once more when the row is opened again, never in a loop", async () => {
@@ -584,7 +584,7 @@ test("malformed detail replies render what is valid and never throw", async () =
 
 // ---- Pins for the detail's guards ----
 
-const imgCount = (week) => week.shadowRoot.querySelectorAll("img").length;
+const imgCount = (week) => week.shadowRoot.all("img").length;
 
 async function openGuard(source, reply = DETAIL) {
   withDetail(source, reply);
@@ -601,10 +601,10 @@ test("a step picture that errors is taken off the page", async () => {
   const week = await openGuard(fakeSource());
   const before = imgCount(week); // the story's own picture and three step pictures
   assert.equal(before, 4);
-  const step = week.shadowRoot.querySelectorAll("img").find((i) => i.src === "/step/gA/1");
+  const step = week.shadowRoot.all("img").find((i) => i.src === "/step/gA/1");
   step.dispatch("error");
   assert.equal(imgCount(week), before - 1);
-  assert.ok(!week.shadowRoot.querySelectorAll("img").some((i) => i.src === "/step/gA/1"));
+  assert.ok(!week.shadowRoot.all("img").some((i) => i.src === "/step/gA/1"));
 });
 
 test("a step picture whose URL request is refused leaves no image behind", async () => {
@@ -727,7 +727,7 @@ test("a source whose detail is not a function is never called or tracked", async
 // ---- More pins for the detail ----
 
 function stepDivs(week) {
-  return week.shadowRoot.querySelectorAll("div").filter((d) => d.style.cssText === "margin-top:8px");
+  return week.shadowRoot.all("div").filter((d) => d.style.cssText === "margin-top:8px");
 }
 
 test("an entirely empty step is skipped, not drawn as a blank gap", async () => {
@@ -849,9 +849,9 @@ async function openLearn(learn, options) {
   return { source, week };
 }
 
-const buttons = (week) => week.shadowRoot.querySelectorAll("button");
+const buttons = (week) => week.shadowRoot.all("button");
 const button = (week, label) => buttons(week).find((b) => b.textContent === label);
-const boxes = (week) => week.shadowRoot.querySelectorAll("textarea");
+const boxes = (week) => week.shadowRoot.all("textarea");
 
 test("an offer asks, with Learn from this and No", async () => {
   const { source, week } = await openLearn({ state: "offered", notes: [], kept: null });
@@ -1075,12 +1075,12 @@ test("a choosing note that is not well-formed is left out, and its score only sh
 test("text from the engine is shown as text, never as markup", async () => {
   const evil = '<img src=x onerror="alert(1)"><b>bold</b>';
   const { week } = await openLearn({ state: "choosing", notes: [{ text: evil, alert: 0.1 }], kept: null });
-  const imgsBefore = week.shadowRoot.querySelectorAll("img").length;
+  const imgsBefore = week.shadowRoot.all("img").length;
   assert.equal(boxes(week)[0].value, evil);
   const kept = await openLearn({ state: "kept", notes: [], kept: evil });
   assert.ok(texts(kept.week).includes(`The guard will remember: ${evil}`));
-  assert.equal(kept.week.shadowRoot.querySelectorAll("img").length, imgsBefore);
-  assert.equal(kept.week.shadowRoot.querySelectorAll("b").length, 0);
+  assert.equal(kept.week.shadowRoot.all("img").length, imgsBefore);
+  assert.equal(kept.week.shadowRoot.all("b").length, 0);
 });
 
 test("the learn section's clicks and keys do not open or close the row", async () => {
@@ -1524,11 +1524,11 @@ test("a visit shows the state line, the headline, who, and the route in time ord
   assert.ok(text.includes("Maple and Rowan at the garage"));
   assert.ok(text.includes("Maple named by the face model, Rowan by Protect"));
   // The route: in the order given, with the alerted stop's words.
-  const route = week.shadowRoot.querySelectorAll("section")[0].textContent;
+  const route = week.shadowRoot.all("section")[0].textContent;
   assert.ok(idx(route, "Sidewalk") < idx(route, "Garage"));
   assert.ok(idx(route, "Garage") < idx(route, "Kitchen"));
   assert.ok(text.includes("Someone came in. The guard alerted here, 74% sure."));
-  const stops = week.shadowRoot.querySelectorAll("li");
+  const stops = week.shadowRoot.all("li");
   assert.equal(stops.length, 3);
   assert.deepEqual(
     stops.map((li) => li.getAttribute("class")),
@@ -1559,7 +1559,7 @@ test("the big picture is the alerted stop's own, and the steps' pictures are not
   // (The story's own picture is asked for while the detail is still on its way.)
   const source = withClips(withDetail(fakeSource(), visitDetail()));
   const week = await openVisit(source);
-  const srcs = week.shadowRoot.querySelectorAll("img").map((i) => i.src);
+  const srcs = week.shadowRoot.all("img").map((i) => i.src);
   // The big picture and the route's thumbnails (stops 0 and 1), nothing from the story itself.
   assert.deepEqual(srcs, ["/step/gV/1", "/step/gV/0", "/step/gV/1"]);
   assert.deepEqual(source.stepAsked, [["gV", 1], ["gV", 0]]);
@@ -1570,18 +1570,18 @@ test("an alerted stop with no picture of its own shows the story's picture", asy
   detail.visit.stops[1].picture = null;
   const source = withClips(withDetail(fakeSource(), detail));
   const week = await openVisit(source);
-  assert.equal(week.shadowRoot.querySelectorAll("img")[0].src, "/signed/gV/1");
+  assert.equal(week.shadowRoot.all("img")[0].src, "/signed/gV/1");
 });
 
 test("tapping the big picture's play button swaps the picture for a video at the clip's address", async () => {
   const source = withClips(withDetail(fakeSource(), visitDetail()));
   const week = await openVisit(source);
-  const big = week.shadowRoot.querySelectorAll("button").find((b) => b.getAttribute("class") === "v-play");
+  const big = week.shadowRoot.all("button").find((b) => b.getAttribute("class") === "v-play");
   assert.ok(big);
-  assert.equal(week.shadowRoot.querySelectorAll("video").length, 0);
+  assert.equal(week.shadowRoot.all("video").length, 0);
   big.dispatch("click");
   await settle();
-  const videos = week.shadowRoot.querySelectorAll("video");
+  const videos = week.shadowRoot.all("video");
   assert.equal(videos.length, 1);
   assert.equal(videos[0].src, "/clip/gV/1");
   // No browser controls over the picture (they cover the video on a phone): a tap on the
@@ -1605,7 +1605,7 @@ test("tapping the big picture's play button swaps the picture for a video at the
 test("a stop's thumbnail plays that stop's clip in its place, and a push does not stop it", async () => {
   const source = withClips(withDetail(fakeSource(), visitDetail()));
   const week = await openVisit(source);
-  const thumbs = week.shadowRoot.querySelectorAll("button").filter((b) => b.getAttribute("class") === "v-thumb");
+  const thumbs = week.shadowRoot.all("button").filter((b) => b.getAttribute("class") === "v-thumb");
   assert.equal(thumbs.length, 2); // the kitchen has no picture
   thumbs[0].dispatch("click");
   await settle();
@@ -1625,47 +1625,47 @@ test("a recording that can't be had leaves the picture and says so", async () =>
     throw new Error("nope");
   };
   const week = await openVisit(source);
-  week.shadowRoot.querySelectorAll("button").find((b) => b.getAttribute("class") === "v-play").dispatch("click");
+  week.shadowRoot.all("button").find((b) => b.getAttribute("class") === "v-play").dispatch("click");
   await settle();
-  assert.equal(week.shadowRoot.querySelectorAll("video").length, 0);
+  assert.equal(week.shadowRoot.all("video").length, 0);
   assert.ok(texts(week).includes("Couldn't load the recording."));
 });
 
 test("without clipUrl there are no play buttons and the pictures stay pictures", async () => {
   const source = withDetail(fakeSource(), visitDetail());
   const week = await openVisit(source);
-  const classes = week.shadowRoot.querySelectorAll("button").map((b) => b.getAttribute("class"));
+  const classes = week.shadowRoot.all("button").map((b) => b.getAttribute("class"));
   assert.ok(!classes.includes("v-play"));
   assert.ok(!classes.includes("v-thumb"));
   assert.ok(!texts(week).includes("Tap to play"));
   assert.ok(texts(week).includes("Maple and Rowan at the garage"));
-  assert.equal(week.shadowRoot.querySelectorAll("img").length, 3);
+  assert.equal(week.shadowRoot.all("img").length, 3);
 });
 
 test("Watch live goes to Protect for the alerted stop's camera, or to the source's own address", async () => {
   const source = withClips(withDetail(fakeSource(), visitDetail()));
   let week = await openVisit(source);
-  let live = week.shadowRoot.querySelectorAll("a").find((a) => a.textContent === "Watch live");
+  let live = week.shadowRoot.all("a").find((a) => a.textContent === "Watch live");
   assert.equal(live.getAttribute("href"), "unifi-protect://protect/devices/cam-garage");
 
   const other = withClips(withDetail(fakeSource(), visitDetail()));
   other.liveUrl = (camera) => `/live/${camera}`;
   week = await openVisit(other);
-  live = week.shadowRoot.querySelectorAll("a").find((a) => a.textContent === "Watch live");
+  live = week.shadowRoot.all("a").find((a) => a.textContent === "Watch live");
   assert.equal(live.getAttribute("href"), "/live/cam-garage");
 
   // No camera on the alerted stop, no button.
   const detail = visitDetail();
   detail.visit.stops[1].camera = null;
   week = await openVisit(withClips(withDetail(fakeSource(), detail)));
-  assert.equal(week.shadowRoot.querySelectorAll("a").length, 0);
+  assert.equal(week.shadowRoot.all("a").length, 0);
 });
 
 test("Every look the guard took is collapsed until asked for, and then shows the steps", async () => {
   const source = withClips(withDetail(fakeSource(), visitDetail()));
   const week = await openVisit(source);
   assert.ok(!texts(week).includes("Garage: someone comes in"));
-  const every = week.shadowRoot.querySelectorAll("button").find((b) => b.textContent === "Every look the guard took (102)");
+  const every = week.shadowRoot.all("button").find((b) => b.textContent === "Every look the guard took (102)");
   assert.ok(every);
   assert.equal(every.getAttribute("aria-expanded"), "false");
   every.dispatch("click");
@@ -1697,7 +1697,7 @@ test("an engine's text on a visit goes in as text, never as markup", async () =>
   const week = await openVisit(source);
   assert.ok(texts(week).includes("<img src=x onerror=alert(1)> at the garage"));
   assert.ok(texts(week).includes("<b>Side</b>"));
-  assert.equal(week.shadowRoot.querySelectorAll("b").length, 0);
+  assert.equal(week.shadowRoot.all("b").length, 0);
 });
 
 test("a detail without a visit renders as it always did", async () => {
@@ -1713,7 +1713,7 @@ test("a detail without a visit renders as it always did", async () => {
   assert.ok(text.includes("Patio: still there, tries the gate"));
   assert.ok(button(week, "That's fine"));
   assert.ok(!text.includes("Every look"));
-  assert.equal(week.shadowRoot.querySelectorAll("li").length, 0);
+  assert.equal(week.shadowRoot.all("li").length, 0);
   // A visit that is not an object is no visit.
   const odd = withDetail(fakeSource(), { ...DETAIL, visit: "nope" });
   const other = mount("hs-week", odd);
@@ -1733,8 +1733,8 @@ test("a visit with no alert says it was a visit, and has no play on the big pict
   const text = texts(week);
   assert.match(text, /Trial visit at /);
   assert.ok(!text.includes("The guard alerted here"));
-  assert.ok(!week.shadowRoot.querySelectorAll("button").some((b) => b.getAttribute("class") === "v-play"));
-  assert.equal(week.shadowRoot.querySelectorAll("li").length, 3);
+  assert.ok(!week.shadowRoot.all("button").some((b) => b.getAttribute("class") === "v-play"));
+  assert.equal(week.shadowRoot.all("li").length, 3);
 });
 
 test("the dashboard source asks for a clip's signed address by story and stop", async () => {
@@ -1776,7 +1776,7 @@ function trackVideos() {
   return { made, restore: () => (document.createElement = real) };
 }
 
-const byClass = (week, tag, cls) => week.shadowRoot.querySelectorAll(tag).find((n) => n.getAttribute("class") === cls);
+const byClass = (week, tag, cls) => week.shadowRoot.all(tag).find((n) => n.getAttribute("class") === cls);
 const TRIAL_TITLE = "Trial: Maple and Rowan came home";
 const NEWER = "2026-10-27T09:30:00Z";
 
@@ -1800,7 +1800,7 @@ test("a newer version of the open story keeps the visit view up, and a playing v
     for (const _ of [0, 1, 2]) {
       assert.ok(texts(week).includes("Maple and Rowan at the garage"));
       assert.equal(week.shadowRoot.querySelector("video"), video);
-      assert.equal(week.shadowRoot.querySelectorAll("li").length, 3);
+      assert.equal(week.shadowRoot.all("li").length, 3);
       await settle();
     }
     assert.ok(!texts(week).includes("Rowan alone at the garage"));
@@ -1808,7 +1808,7 @@ test("a newer version of the open story keeps the visit view up, and a playing v
     video.paused = true;
     video.dispatch("pause");
     assert.ok(texts(week).includes("Rowan alone at the garage"));
-    assert.equal(week.shadowRoot.querySelectorAll("video").length, 0);
+    assert.equal(week.shadowRoot.all("video").length, 0);
   } finally {
     track.restore();
   }
@@ -1826,7 +1826,7 @@ test("with nothing playing, a newer version swaps in when its detail arrives, wi
   answer.visit.headline = "Rowan alone at the garage";
   source.push([guardStory("gV", { title: TRIAL_TITLE, updated: NEWER })]);
   assert.ok(texts(week).includes("Maple and Rowan at the garage")); // still the old view, not the plain one
-  assert.equal(week.shadowRoot.querySelectorAll("li").length, 3);
+  assert.equal(week.shadowRoot.all("li").length, 3);
   await settle();
   await settle();
   assert.ok(texts(week).includes("Rowan alone at the garage"));
@@ -1879,7 +1879,7 @@ test("a picture address that failed is asked for again, not remembered", async (
     source.stepAsked.filter(([, n]) => n === 0),
     [["gV", 0], ["gV", 0]],
   );
-  assert.ok(week.shadowRoot.querySelectorAll("img").some((i) => i.src === "/step/gV/0"));
+  assert.ok(week.shadowRoot.all("img").some((i) => i.src === "/step/gV/0"));
 });
 
 test("the engine's trial flag decides, and the title's Trial: prefix is the fallback", async () => {
@@ -1902,7 +1902,7 @@ test("an alerted stop whose picture is number 0 still gets its picture, its clip
   detail.visit.stops[1].picture = 0;
   const source = withClips(withDetail(fakeSource(), detail));
   const week = await openVisit(source);
-  assert.equal(week.shadowRoot.querySelectorAll("img")[0].src, "/step/gV/0");
+  assert.equal(week.shadowRoot.all("img")[0].src, "/step/gV/0");
 });
 
 test("the alerted stop can be named by position when no stop says so", async () => {
@@ -1910,7 +1910,7 @@ test("the alerted stop can be named by position when no stop says so", async () 
   for (const stop of detail.visit.stops) stop.alerted = false;
   const source = withClips(withDetail(fakeSource(), detail));
   const week = await openVisit(source);
-  const stops = week.shadowRoot.querySelectorAll("li");
+  const stops = week.shadowRoot.all("li");
   assert.deepEqual(
     stops.map((li) => li.getAttribute("class")),
     ["v-stop", "v-stop v-here", "v-stop v-known"],
@@ -1928,7 +1928,7 @@ test("a stop that is not well-formed keeps the later stops' clip numbers", async
   detail.visit.alerted = { stop: 2, alert: 0.74 };
   const source = withClips(withDetail(fakeSource(), detail));
   const week = await openVisit(source);
-  assert.equal(week.shadowRoot.querySelectorAll("li").length, 2);
+  assert.equal(week.shadowRoot.all("li").length, 2);
   byClass(week, "button", "v-play").dispatch("click");
   await settle();
   assert.deepEqual(source.clipAsked, [["gV", 2]]);
@@ -1948,7 +1948,7 @@ test("a double tap on play asks for the recording once", async () => {
   release();
   await settle();
   assert.equal(source.clipAsked.length, 1);
-  assert.equal(week.shadowRoot.querySelectorAll("video").length, 1);
+  assert.equal(week.shadowRoot.all("video").length, 1);
 });
 
 test("a recording that fails to play puts the picture and the button back, and tapping asks afresh", async () => {
@@ -1960,13 +1960,13 @@ test("a recording that fails to play puts the picture and the button back, and t
     byClass(week, "button", "v-play").dispatch("click");
     await settle();
     week.shadowRoot.querySelector("video").dispatch("error");
-    assert.equal(week.shadowRoot.querySelectorAll("video").length, 0);
-    assert.equal(shot.querySelectorAll("img").length, 1);
+    assert.equal(week.shadowRoot.all("video").length, 0);
+    assert.equal(shot.all("img").length, 1);
     assert.ok(byClass(week, "button", "v-play"));
     assert.ok(texts(week).includes("Couldn't play the recording."));
     assert.equal(shot.getAttribute("class"), "v-shot");
     // A thumbnail that failed the same way is no longer styled as a playing clip.
-    const slot = week.shadowRoot.querySelectorAll("div").find((d) => (d.getAttribute("class") || "").startsWith("v-clip-slot"));
+    const slot = week.shadowRoot.all("div").find((d) => (d.getAttribute("class") || "").startsWith("v-clip-slot"));
     byClass(week, "button", "v-thumb").dispatch("click");
     await settle();
     assert.equal(slot.getAttribute("class"), "v-clip-slot v-clip");
@@ -1976,7 +1976,7 @@ test("a recording that fails to play puts the picture and the button back, and t
     byClass(week, "button", "v-play").dispatch("click");
     await settle();
     assert.deepEqual(source.clipAsked, [["gV", 1], ["gV", 0], ["gV", 1]]);
-    assert.equal(week.shadowRoot.querySelectorAll("video").length, 1);
+    assert.equal(week.shadowRoot.all("video").length, 1);
   } finally {
     track.restore();
   }
@@ -1992,11 +1992,11 @@ test("a picture that already failed is not put back when the recording fails", a
     };
     const week = await openVisit(source);
     const shot = byClass(week, "div", "v-shot");
-    assert.equal(shot.querySelectorAll("img").length, 0);
+    assert.equal(shot.all("img").length, 0);
     byClass(week, "button", "v-play").dispatch("click");
     await settle();
     week.shadowRoot.querySelector("video").dispatch("error");
-    assert.equal(shot.querySelectorAll("img").length, 0);
+    assert.equal(shot.all("img").length, 0);
     assert.ok(byClass(week, "button", "v-play"));
   } finally {
     track.restore();
@@ -2158,7 +2158,7 @@ test("a video that never plays does not hold back a newer version", async () => 
     const week = await openVisit(source);
     byClass(week, "button", "v-play").dispatch("click");
     await settle();
-    assert.equal(week.shadowRoot.querySelectorAll("video").length, 1); // inserted, but never `playing`
+    assert.equal(week.shadowRoot.all("video").length, 1); // inserted, but never `playing`
     answer = visitDetail();
     answer.visit.headline = "Rowan alone at the garage";
     source.push([guardStory("gV", { title: TRIAL_TITLE, updated: NEWER })]);
@@ -2276,7 +2276,7 @@ test("a newer version with no detail takes the old visit view away", async () =>
   await settle();
   await settle();
   assert.ok(!texts(week).includes("Maple and Rowan at the garage"));
-  assert.equal(week.shadowRoot.querySelectorAll("li").length, 0);
+  assert.equal(week.shadowRoot.all("li").length, 0);
   assert.ok(texts(week).includes("Someone at the garage."));
 });
 
@@ -2358,9 +2358,9 @@ function withScrub(source, cameras = [
 }
 
 const withClass = (week, tag, cls) =>
-  week.shadowRoot.querySelectorAll(tag).find((n) => (n.getAttribute("class") || "").split(" ").includes(cls));
+  week.shadowRoot.all(tag).find((n) => (n.getAttribute("class") || "").split(" ").includes(cls));
 const allByClass = (week, tag, cls) =>
-  week.shadowRoot.querySelectorAll(tag).filter((n) => (n.getAttribute("class") || "").split(" ").includes(cls));
+  week.shadowRoot.all(tag).filter((n) => (n.getAttribute("class") || "").split(" ").includes(cls));
 
 test("with a source that has footage, each stop with a camera is a player, with no browser controls", async () => {
   const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
@@ -2382,14 +2382,14 @@ test("with a source that has footage, each stop with a camera is a player, with 
   assert.equal(allByClass(week, "span", "s-clock").length, 2);
   // The old thumbnails and Watch live are gone where the players are.
   assert.equal(allByClass(week, "button", "v-thumb").length, 0);
-  assert.equal(week.shadowRoot.querySelectorAll("a").filter((a) => a.textContent === "Watch live").length, 0);
+  assert.equal(week.shadowRoot.all("a").filter((a) => a.textContent === "Watch live").length, 0);
 });
 
 test("a camera's detections are asked for in ten-minute blocks, once each", async () => {
   const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
   const week = await openVisit(source);
   assert.deepEqual(source.detectionsAsked, []); // not before the first picture shows
-  for (const video of week.shadowRoot.querySelectorAll("video")) video.dispatch("loadeddata");
+  for (const video of week.shadowRoot.all("video")) video.dispatch("loadeddata");
   await settle();
   const side = source.detectionsAsked.filter(([camera]) => camera === "cam-side");
   assert.equal(side.length, 3); // the block the moment is in, and one either side
@@ -2520,7 +2520,7 @@ const recentDetail = (seconds = 20) => {
   detail.visit.stops[0].time = new Date(Date.now() - seconds * 1000).toISOString();
   return detail;
 };
-const liveShown = (node) => node.querySelectorAll("img").filter((i) => i.getAttribute("class") === "s-live");
+const liveShown = (node) => node.all("img").filter((i) => i.getAttribute("class") === "s-live");
 
 // Live as the engine sends it: multipart JPEGs, each part with its length. `liveStreams` holds
 // every stream opened; push() sends a part, end() ends it, and `aborted` says it was closed.
@@ -2605,7 +2605,7 @@ test("opening another row puts the first row's cameras to sleep", async () => {
   const week = mount("hs-week", source);
   source.push([guardStory("gV"), guardStory("gW")]);
   await settle();
-  const rows = () => week.shadowRoot.querySelectorAll("div").filter((d) => d.getAttribute("role") === "button");
+  const rows = () => week.shadowRoot.all("div").filter((d) => d.getAttribute("role") === "button");
   rows()[0].dispatch("click");
   await settle();
   await settle();
@@ -3322,7 +3322,7 @@ test("detections: each kept once, malformed ones left out, none asked for a bloc
   const nowS = Date.now() / 1000;
   assert.ok(source.detectionsAsked.filter(([camera]) => camera === "cam-side").every(([, start]) => start <= nowS));
   const side = lanesOf(week).tapes[0];
-  const dets = side.querySelectorAll("span").filter((n) => (n.getAttribute("class") || "").startsWith("s-det"));
+  const dets = side.all("span").filter((n) => (n.getAttribute("class") || "").startsWith("s-det"));
   assert.equal(dets.length, 2); // the person once (every block answered it), and the vehicle-less one
   assert.deepEqual(dets.map((n) => n.getAttribute("class")).sort(), ["s-det s-other", "s-det s-person"]);
   week._current.get("gV").pause();
@@ -3598,7 +3598,7 @@ test("a source missing any of the five keeps today's thumbnails", async () => {
   const week = await openVisit(source);
   assert.equal(allByClass(week, "div", "s-player").length, 0);
   assert.equal(allByClass(week, "button", "v-thumb").length, 2);
-  assert.equal(week.shadowRoot.querySelectorAll("a").filter((a) => a.textContent === "Watch live").length, 1);
+  assert.equal(week.shadowRoot.all("a").filter((a) => a.textContent === "Watch live").length, 1);
 });
 
 test("a stop starts at its camera's own moment, and Line up uses the alerted stop's", async () => {
@@ -4384,7 +4384,7 @@ test("a detection still going when first seen is put right once its end is known
     const week = await openVisit(source);
     await settle();
     await settle();
-    const people = () => lanesOf(week).tapes[0].querySelectorAll("span").filter((n) => n.getAttribute("class") === "s-det s-person");
+    const people = () => lanesOf(week).tapes[0].all("span").filter((n) => n.getAttribute("class") === "s-det s-person");
     assert.equal(people().length, 1); // still going, as far as anyone knew
     end = start + 10; // it ended long ago
     skew(31000);
@@ -5196,7 +5196,7 @@ test("a camera's Live button takes it to now, and stays away while it is Live", 
   const source = withScrub(withClips(withDetail(fakeSource(), visitDetail())));
   const week = await openVisit(source);
   const golive = () => allByClass(week, "button", "s-golive");
-  const shownIn = (i) => lanesOf(week).players[i].querySelectorAll("button").some((b) => b.getAttribute("class") === "s-golive");
+  const shownIn = (i) => lanesOf(week).players[i].all("button").some((b) => b.getAttribute("class") === "s-golive");
   assert.equal(golive().length, 2);
   assert.equal(golive()[0].getAttribute("aria-label"), "Go Live: Sidewalk");
   golive()[0].dispatch("click");
@@ -5246,7 +5246,7 @@ test("leaving Live brings back the camera's sound and Live buttons", async () =>
   const source = withScrub(withClips(withDetail(fakeSource(), recentDetail())));
   const week = await openVisit(source);
   await settle();
-  const has = (node, cls) => node.querySelectorAll("button").some((b) => b.getAttribute("class") === cls);
+  const has = (node, cls) => node.all("button").some((b) => b.getAttribute("class") === cls);
   assert.equal(has(lanesOf(week).pics[0], "s-snd"), false);
   assert.equal(has(lanesOf(week).players[0], "s-golive"), false);
   lanesOf(week).keys[0].dispatch("input", { target: { value: String(Math.floor(Date.now() / 1000) - 3600) } });

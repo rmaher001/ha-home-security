@@ -1,6 +1,28 @@
 // Just enough DOM to run the cards in Node: elements, shadow roots, events, custom elements.
 // No dependencies, so the suite runs anywhere Node does.
 
+// What a browser's querySelectorAll gives: indexable, iterable, forEach, and no array
+// methods (no find, filter, map, some), so card code that leans on them fails here too.
+class NodeList {
+  #items;
+  constructor(items) {
+    this.#items = items;
+    items.forEach((item, i) => (this[i] = item));
+  }
+  get length() {
+    return this.#items.length;
+  }
+  item(i) {
+    return this.#items[i] ?? null;
+  }
+  forEach(fn, self) {
+    this.#items.forEach((item, i) => fn.call(self, item, i, this));
+  }
+  [Symbol.iterator]() {
+    return this.#items[Symbol.iterator]();
+  }
+}
+
 class Node {}
 
 class Text extends Node {
@@ -89,7 +111,11 @@ class Element extends Node {
       }
     };
     walk(this);
-    return found;
+    return new NodeList(found);
+  }
+  // The tests' own way to search: an array (the card itself only gets what a browser gives).
+  all(tag) {
+    return Array.from(this.querySelectorAll(tag));
   }
   querySelector(tag) {
     return this.querySelectorAll(tag)[0] || null;

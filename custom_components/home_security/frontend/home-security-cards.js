@@ -352,7 +352,7 @@ class HsElement extends HTMLElement {
     this._repainting = false;
     if (!focused && !this._wantFocus) return;
     const target = this._wantFocus
-      ? this.shadowRoot.querySelectorAll("textarea").find((box) => box.hsKey === this._wantFocus)
+      ? Array.from(this.shadowRoot.querySelectorAll("textarea")).find((box) => box.hsKey === this._wantFocus)
       : focused;
     if (!target) return;
     this._wantFocus = null;
