@@ -2326,7 +2326,8 @@ function addCameraRow(source, view, addRow) {
 // version (so a push never reloads a picture or stops a playing recording); the That's fine
 // button goes in `fineSlot`, which the card fills each time it draws.
 function visitBlock(source, story, data, visit, learn, kept) {
-  const canPlay = typeof source.clipUrl === "function";
+  // A stop no camera saw (a window sensor) has no recording to ask for (#57 in home-security).
+  const canPlay = (stop) => typeof source.clipUrl === "function" && Boolean(stop?.camera);
   // Each camera through time, when the source has footage (the engine's page does).
   const here = visit.here;
   const alertAt = epochOf(here?.cameraTime || here?.time);
@@ -2389,9 +2390,9 @@ function visitBlock(source, story, data, visit, learn, kept) {
   const at = here ? clockTime(here.time) : null;
   const where = here ? `${here.place || "Here"}${at ? ` at ${at}` : ""}.` : "";
   const captionText = el("span", {}, "");
-  const say = (playing) => captionText.replaceChildren(`${where}${canPlay ? (playing ? " Playing the recording." : " Tap to play the recording.") : ""}`);
+  const say = (playing) => captionText.replaceChildren(`${where}${canPlay(here) ? (playing ? " Playing the recording." : " Tap to play the recording.") : ""}`);
   say(false);
-  if (here && canPlay) {
+  if (here && canPlay(here)) {
     const play = el(
       "button",
       { class: "v-play", "aria-label": `Play the ${here.place ? `${here.place} ` : ""}recording` },
@@ -2441,7 +2442,7 @@ function visitBlock(source, story, data, visit, learn, kept) {
       media = scrub.add({ camera: stop.camera, place: stop.place, anchor }).player;
     } else if (stop.picture !== null && typeof source.stepPictureUrl === "function") {
       const thumb = stepPicture(stop.picture);
-      if (canPlay) {
+      if (canPlay(stop)) {
         const slot = el("div", { class: "v-clip-slot" });
         const button = el(
           "button",

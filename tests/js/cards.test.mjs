@@ -2003,6 +2003,29 @@ test("a picture that already failed is not put back when the recording fails", a
   }
 });
 
+test("a stop no camera saw offers no recording (#57 in home-security)", async () => {
+  const track = trackVideos();
+  try {
+    const detail = visitDetail();
+    detail.visit.alerted = { stop: 2, alert: 0.79 };
+    detail.visit.stops = detail.visit.stops.map((stop, i) => ({ ...stop, alerted: i === 2, picture: i === 2 ? 1 : stop.picture }));
+    detail.visit.stops[0] = { ...detail.visit.stops[0], camera: null };
+    const source = withClips(withDetail(fakeSource(), detail));
+    const week = await openVisit(source);
+    const words = texts(week);
+    assert.ok(!words.includes("Tap to play the recording."));
+    assert.ok(words.includes("Kitchen at "));
+    const shot = byClass(week, "div", "v-shot");
+    assert.equal(shot.all("button").filter((b) => b.getAttribute("class") === "v-play").length, 0);
+    // The sidewalk's picture stays a picture, not a button that asks for a recording.
+    const thumbs = week.shadowRoot.all("button").filter((b) => b.getAttribute("class") === "v-thumb");
+    assert.deepEqual(thumbs.map((b) => b.getAttribute("aria-label")), ["Play the Garage recording"]);
+    assert.deepEqual(source.clipAsked, []);
+  } finally {
+    track.restore();
+  }
+});
+
 test("the caption says the recording is playing, and goes back when it stops", async () => {
   const track = trackVideos();
   try {
